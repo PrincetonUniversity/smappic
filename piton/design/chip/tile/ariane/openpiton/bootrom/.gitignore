@@ -1,0 +1,7 @@
+*.elf
+*.img
+*.dtb
+*.sv
+ariane.dts
+info.h
+bootrom_linux.h

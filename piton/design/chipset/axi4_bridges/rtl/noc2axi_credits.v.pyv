@@ -1,0 +1,244 @@
+// ========== Copyright Header Begin ============================================
+// Copyright (c) 2022 Princeton University
+// All rights reserved.
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are met:
+//     * Redistributions of source code must retain the above copyright
+//       notice, this list of conditions and the following disclaimer.
+//     * Redistributions in binary form must reproduce the above copyright
+//       notice, this list of conditions and the following disclaimer in the
+//       documentation and/or other materials provided with the distribution.
+//     * Neither the name of Princeton University nor the
+//       names of its contributors may be used to endorse or promote products
+//       derived from this software without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY PRINCETON UNIVERSITY "AS IS" AND
+// ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+// WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+// DISCLAIMED. IN NO EVENT SHALL PRINCETON UNIVERSITY BE LIABLE FOR ANY
+// DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+// (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+// LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+// ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+// SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+// ========== Copyright Header End ============================================
+
+
+<%
+from pyhplib import *
+%>
+
+`include "axi_defines.vh"
+`include "define.tmp.h"
+
+
+module noc2axi_credits (
+    input axi_clk,    // Clock
+    input axi_rst_n,  // Asynchronous reset active low
+    
+    input [`NOC_CHIPID_WIDTH-1:0] buf1_chipid, 
+    input [`NOC_CHIPID_WIDTH-1:0] buf2_chipid, 
+    input [`NOC_CHIPID_WIDTH-1:0] buf3_chipid, 
+    input buf1_chosen, 
+    input buf2_chosen, 
+    input buf3_chosen,
+    output credits1_nz, 
+    output credits2_nz, 
+    output credits3_nz, 
+
+    input wr_dispatch, 
+    input [`NOC_CHIPID_WIDTH-1:0] wr_chipid, 
+
+    output wire  [`AXI4_ID_WIDTH     -1:0]    m_axi_arid,
+    output wire  [`AXI4_ADDR_WIDTH   -1:0]    m_axi_araddr,
+    output wire  [`AXI4_LEN_WIDTH    -1:0]    m_axi_arlen,
+    output wire  [`AXI4_SIZE_WIDTH   -1:0]    m_axi_arsize,
+    output wire  [`AXI4_USER_WIDTH   -1:0]    m_axi_aruser,
+    output wire                               m_axi_arvalid,
+    input  wire                               m_axi_arready,
+    input  wire  [`AXI4_ID_WIDTH     -1:0]    m_axi_rid,
+    input  wire  [`AXI4_DATA_WIDTH   -1:0]    m_axi_rdata,
+    input  wire  [`AXI4_RESP_WIDTH   -1:0]    m_axi_rresp,
+    input  wire                               m_axi_rlast,
+    input  wire                               m_axi_rvalid,
+    output wire                               m_axi_rready,
+
+    input wire   [`NOC_CHIPID_WIDTH-1:0]      chipid, 
+<%
+for i in range(PITON_NUM_CHIPS):
+    print(f"    input wire   [`AXI4_ADDR_WIDTH-1:0]       chip{i}_base, ")
+%>
+    input wire   [`AXI4_ADDR_WIDTH-1:0]       host_base
+
+);
+
+assign m_axi_arlen    = `AXI4_LEN_WIDTH'b0; // Use only length-1 bursts
+assign m_axi_arsize   = `AXI4_SIZE_WIDTH'b110; // Always transfer 64 bytes
+assign m_axi_aruser   = `AXI4_USER_WIDTH'b0; // Do not use user field
+
+wire axi_ar_go = m_axi_arvalid & m_axi_arready;
+wire axi_r_go = m_axi_rvalid & m_axi_rready;
+
+
+<%
+str = f'''\
+reg [7:0] credits3[{PITON_NUM_CHIPS}:0];
+reg [7:0] credits2[{PITON_NUM_CHIPS}:0];
+reg [7:0] credits1[{PITON_NUM_CHIPS}:0];
+'''
+print(str)
+%>
+
+assign credits1_nz = (credits1[buf1_chipid] > 8'd0);
+assign credits2_nz = (credits2[buf2_chipid] > 8'd0);
+assign credits3_nz = (credits3[buf3_chipid] > 8'd0);
+
+<%
+str = f"wire[{PITON_NUM_CHIPS}:0] need_credits = {{\n"
+for i in range(PITON_NUM_CHIPS, -1, -1):
+  str += f"  (credits1[{i}] < 8'd127) | (credits2[{i}] < 8'd127) | (credits3[{i}] < 8'd127),\n"
+str = str[:-2] + "\n};\n"
+print(str)
+%>
+
+// do round robin arbitration
+reg [`NOC_CHIPID_WIDTH-1:0] ar_chipid;
+<%
+print(f"wire [`NOC_CHIPID_WIDTH-1:0] ar_chipid_next = (ar_chipid + 1) % {PITON_NUM_CHIPS + 1};")
+%>
+
+always @(posedge axi_clk) begin
+  if(~axi_rst_n) begin
+    ar_chipid <= 0;
+  end 
+  else begin
+    ar_chipid <= ar_chipid_next;
+  end
+end
+
+reg [`AXI4_ADDR_WIDTH-1:0] ar_addr;
+
+always @(*) begin
+  case (ar_chipid)
+<%
+for i in range(PITON_NUM_CHIPS):
+  str = f"    {i}       : ar_addr = chip{i}_base;"
+  print(str)
+print("    default : ar_addr = host_base;", end='')
+%>
+  endcase
+  ar_addr[13:9] = chipid;
+end
+
+// we get credits by doing "reads" from other hosts
+// need to not do too many reads (dont waste bw), 
+// so we keep number of read requests ~ the same 
+// as the number of write requests
+
+
+<% 
+str = f'''\
+reg [7:0] rd_wr_diff[{PITON_NUM_CHIPS}:0];
+wire [{PITON_NUM_CHIPS}:0] rd_wr_diff_up;
+wire [{PITON_NUM_CHIPS}:0] rd_wr_diff_down;
+'''
+for i in range(PITON_NUM_CHIPS + 1):
+  str += f'''\
+assign rd_wr_diff_up  [{i}] = wr_dispatch & (wr_chipid == {i});
+assign rd_wr_diff_down[{i}] = axi_ar_go   & (ar_chipid == {i});
+'''
+print(str, end='')
+%>
+
+
+always @(posedge axi_clk) begin
+  if(~axi_rst_n) begin
+<%
+for i in range(PITON_NUM_CHIPS + 1):
+  print(f"    rd_wr_diff[{i}] <= 0;")
+%>
+  end 
+  else begin
+<%
+for i in range(PITON_NUM_CHIPS + 1):
+  print(f"    rd_wr_diff[{i}] <= rd_wr_diff[{i}] + rd_wr_diff_up[{i}] - rd_wr_diff_down[{i}];")
+%>
+  end
+end
+
+<%
+str = f"wire [{PITON_NUM_CHIPS}:0] rd_wr_diff_positive = {{"
+for i in range(PITON_NUM_CHIPS, -1, -1):
+  str += f"rd_wr_diff[{i}] > 0, "
+str = str[:-2] + "};"
+print(str)
+%>
+
+wire [`NOC_CHIPID_WIDTH-1:0] r_chipid = m_axi_rdata[3*`NOC_DATA_WIDTH+`NOC_CHIPID_WIDTH-1:3*`NOC_DATA_WIDTH];
+
+<%
+print(f"wire [{PITON_NUM_CHIPS}:0] credits_up;")
+print(f"wire [{PITON_NUM_CHIPS}:0] credits1_down;")
+print(f"wire [{PITON_NUM_CHIPS}:0] credits2_down;")
+print(f"wire [{PITON_NUM_CHIPS}:0] credits3_down;")
+
+for i in range(PITON_NUM_CHIPS):
+  str = f'''\
+assign credits_up[{i}]    = axi_r_go & (r_chipid == {i});
+assign credits1_down[{i}] = wr_dispatch & buf1_chosen & (wr_chipid == {i});
+assign credits2_down[{i}] = wr_dispatch & buf2_chosen & (wr_chipid == {i});
+assign credits3_down[{i}] = wr_dispatch & buf3_chosen & (wr_chipid == {i});
+'''
+  print(str)
+str = f'''\
+assign credits_up[{PITON_NUM_CHIPS}]    = axi_r_go & (r_chipid >=  {PITON_NUM_CHIPS});
+assign credits1_down[{PITON_NUM_CHIPS}]  = wr_dispatch & buf1_chosen & (wr_chipid >=  {PITON_NUM_CHIPS});
+assign credits2_down[{PITON_NUM_CHIPS}]  = wr_dispatch & buf2_chosen & (wr_chipid >=  {PITON_NUM_CHIPS});
+assign credits3_down[{PITON_NUM_CHIPS}]  = wr_dispatch & buf3_chosen & (wr_chipid >=  {PITON_NUM_CHIPS});
+'''
+print(str)
+%>
+
+
+
+always @(posedge axi_clk) begin
+  if(~axi_rst_n) begin
+<%
+for i in range(PITON_NUM_CHIPS + 1):
+  str = f'''\
+    credits1[{i}] <= 8'd127;
+    credits2[{i}] <= 8'd127;
+    credits3[{i}] <= 8'd127;
+'''
+  print(str, end='')
+%>
+  end 
+  else begin
+<%
+for i in range(PITON_NUM_CHIPS):
+  str = f'''\
+    credits1[{i}] <= credits1[{i}] + credits_up[{i}]*m_axi_rdata[1*`NOC_DATA_WIDTH-1:0*`NOC_DATA_WIDTH] - credits1_down[{i}];
+    credits2[{i}] <= credits2[{i}] + credits_up[{i}]*m_axi_rdata[2*`NOC_DATA_WIDTH-1:1*`NOC_DATA_WIDTH] - credits2_down[{i}];
+    credits3[{i}] <= credits3[{i}] + credits_up[{i}]*m_axi_rdata[3*`NOC_DATA_WIDTH-1:2*`NOC_DATA_WIDTH] - credits3_down[{i}];
+'''
+  print(str, end='')
+str = f'''\
+    credits1[{PITON_NUM_CHIPS}] <= credits1[{PITON_NUM_CHIPS}];
+    credits2[{PITON_NUM_CHIPS}] <= credits2[{PITON_NUM_CHIPS}];
+    credits3[{PITON_NUM_CHIPS}] <= credits3[{PITON_NUM_CHIPS}];
+'''
+print(str)
+%>
+  end
+end
+
+
+assign m_axi_arid = 6'b100000;
+assign m_axi_araddr = ar_addr;
+assign m_axi_arvalid = need_credits[ar_chipid] & rd_wr_diff_positive[ar_chipid];
+assign m_axi_rready = 1'b1;
+
+
+endmodule

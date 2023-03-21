@@ -1,0 +1,87 @@
+#!/usr/bin/python3
+# Copyright (c) 2019 Princeton University
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#     * Redistributions of source code must retain the above copyright
+#       notice, this list of conditions and the following disclaimer.
+#     * Redistributions in binary form must reproduce the above copyright
+#       notice, this list of conditions and the following disclaimer in the
+#       documentation and/or other materials provided with the distribution.
+#     * Neither the name of Princeton University nor the
+#       names of its contributors may be used to endorse or promote products
+#       derived from this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY PRINCETON UNIVERSITY "AS IS" AND
+# ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+# WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+# DISCLAIMED. IN NO EVENT SHALL PRINCETON UNIVERSITY BE LIABLE FOR ANY
+# DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+# (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+# LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+# ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+# SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+import subprocess
+from optparse import OptionParser
+import os
+import re
+script_folder = os.path.join(os.environ["DV_ROOT"], "tools/src/smappic")
+
+def main():
+    parser = OptionParser(add_help_option=True)
+    parser.add_option("-f", "--fpgas", dest="fpgas", default="1", help="Number of FPGAs in the system")
+    parser.add_option("-c", "--chips", dest="chips", default="1", help="Number of chips in the system")
+    (options, args) = parser.parse_args()
+    fpgas = int(options.fpgas, 0)
+    chips = int(options.chips, 0)
+    if (fpgas < 1) or (fpgas > 4):
+        parser.error("fpgas must be between 1 and 4")
+    if (chips < 1) or (chips > 16):
+        parser.error("chips must be between 1 and 16")
+    if (chips % fpgas) != 0:
+        parser.error("number of chips should be divisible by the number of fpgas")
+    
+    # get data from kernel logs about base addresses of the host and fpgas
+    base_addresses = []
+    addr_names = [f"FPGA {i}" for i in range(fpgas)] + ["Host"]
+    for name in addr_names:
+        p1 = subprocess.Popen(["journalctl", "-k", "-q"], stdout=subprocess.PIPE)
+        p2 = subprocess.Popen(["grep", name], stdin=p1.stdout, stdout=subprocess.PIPE)
+        p3 = subprocess.Popen(["tail", "-n1"], stdin = p2.stdout, stdout=subprocess.PIPE)
+        journalctl_entry = p3.communicate()[0]
+        address = re.findall(r'0x[0-9a-fA-F]+', journalctl_entry.decode('utf-8'))[0]
+        base_addresses += [int(address, 0)]
+
+
+    chips_per_fpga = int(chips / fpgas)
+    script_path = os.path.join(script_folder, "./smappic_reg_rw")
+
+    for f in range(fpgas):
+        # config fpga id
+        subprocess.call(["sudo", script_path, str(f), "0x8", str(f)])
+        addr = 0x1000
+        for c in range(chips):
+            # config addresses per each chip.
+            # if the transmission is local - only local destination in bits [47:42] is set.
+            # if the transmission is inter-fpga - the fpga base address is used, and the local destination
+            # is written to bits [20:16]
+            is_local = 1 if ((f * chips_per_fpga <= c) and (c < (f + 1) * chips_per_fpga)) else 0
+            c_local = c % chips_per_fpga
+            c_fpga = int(c / chips_per_fpga)
+            if is_local:
+                val = (c_local + 1) << 44
+            else:
+                val = base_addresses[c_fpga] | ((c_local + 1) << 16)
+            subprocess.call(["sudo", script_path, str(f), hex(addr), hex(val & 0xffffffff)])
+            addr += 4
+            subprocess.call(["sudo", script_path, str(f), hex(addr), hex(val >> 32)])
+            addr += 4
+        # config address of the host
+        subprocess.call(["sudo", script_path, str(f), hex(addr), hex(base_addresses[fpgas])])
+
+if __name__ == '__main__':
+    main()
+

@@ -1,0 +1,328 @@
+// ========== Copyright Header Begin ============================================
+// Copyright (c) 2022 Princeton University
+// All rights reserved.
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are met:
+//     * Redistributions of source code must retain the above copyright
+//       notice, this list of conditions and the following disclaimer.
+//     * Redistributions in binary form must reproduce the above copyright
+//       notice, this list of conditions and the following disclaimer in the
+//       documentation and/or other materials provided with the distribution.
+//     * Neither the name of Princeton University nor the
+//       names of its contributors may be used to endorse or promote products
+//       derived from this software without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY PRINCETON UNIVERSITY "AS IS" AND
+// ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+// WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+// DISCLAIMED. IN NO EVENT SHALL PRINCETON UNIVERSITY BE LIABLE FOR ANY
+// DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+// (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+// LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+// ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+// SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+// ========== Copyright Header End ============================================
+
+
+`include "axi_defines.vh"
+`include "define.tmp.h"
+
+<%
+from pyhplib import *
+%>
+
+module axi2noc (
+    input piton_clk,    // Clock
+    input piton_rst_n,  // Asynchronous reset active low
+    input axi_clk, 
+    input axi_rst_n,
+    
+    // Noc interface
+    output  wire                                   noc1_val,
+    output  wire [`NOC_DATA_WIDTH-1:0]             noc1_data,
+    input   wire                                   noc1_rdy,
+    output  wire                                   noc2_val,
+    output  wire [`NOC_DATA_WIDTH-1:0]             noc2_data,
+    input   wire                                   noc2_rdy,
+    output  wire                                   noc3_val,
+    output  wire [`NOC_DATA_WIDTH-1:0]             noc3_data,
+    input   wire                                   noc3_rdy,
+
+    // AXI interace
+    input  wire [`AXI4_ID_WIDTH     -1:0]     s_axi_awid,
+    input  wire [`AXI4_ADDR_WIDTH   -1:0]     s_axi_awaddr,
+    input  wire [`AXI4_LEN_WIDTH    -1:0]     s_axi_awlen,
+    input  wire [`AXI4_SIZE_WIDTH   -1:0]     s_axi_awsize,
+    input  wire                               s_axi_awvalid,
+    output wire                               s_axi_awready,
+    input  wire  [`AXI4_DATA_WIDTH   -1:0]    s_axi_wdata,
+    input  wire  [`AXI4_STRB_WIDTH   -1:0]    s_axi_wstrb,
+    input  wire                               s_axi_wlast,
+    input  wire                               s_axi_wvalid,
+    output wire                               s_axi_wready,
+    input  wire  [`AXI4_ID_WIDTH     -1:0]    s_axi_arid,
+    input  wire  [`AXI4_ADDR_WIDTH   -1:0]    s_axi_araddr,
+    input  wire  [`AXI4_LEN_WIDTH    -1:0]    s_axi_arlen,
+    input  wire  [`AXI4_SIZE_WIDTH   -1:0]    s_axi_arsize,
+    input  wire                               s_axi_arvalid,
+    output wire                               s_axi_arready,
+    output wire  [`AXI4_ID_WIDTH     -1:0]    s_axi_rid,
+    output wire  [`AXI4_DATA_WIDTH   -1:0]    s_axi_rdata,
+    output wire  [`AXI4_RESP_WIDTH   -1:0]    s_axi_rresp,
+    output wire                               s_axi_rlast,
+    output wire                               s_axi_rvalid,
+    input  wire                               s_axi_rready,
+    output wire  [`AXI4_ID_WIDTH     -1:0]    s_axi_bid,
+    output wire  [`AXI4_RESP_WIDTH   -1:0]    s_axi_bresp,
+    output wire                               s_axi_bvalid,
+    input  wire                               s_axi_bready, 
+
+    input wire   [`NOC_CHIPID_WIDTH-1:0]      chipid, 
+    input wire   [`NOC_CHIPID_WIDTH-1:0]      fpgaid
+);
+
+
+wire axi_awgo = s_axi_awvalid & s_axi_awready;
+wire axi_wgo = s_axi_wvalid & s_axi_wready;
+wire axi_bgo = s_axi_bvalid & s_axi_bready;
+
+reg aw_recvd;
+reg w_recvd;
+wire dispatch = aw_recvd & w_recvd;
+
+// AXI part
+// receive data from awaddr
+reg [`NOC_CHIPID_WIDTH-1:0] wr_chipid;
+reg [2:0] wr_noc_vals;
+reg [`AXI4_ID_WIDTH-1:0] axi_awid;
+always @(posedge axi_clk) begin
+    if(~axi_rst_n) begin
+        wr_chipid <= 0;
+        wr_noc_vals <= 0;
+        aw_recvd <= 0;
+        axi_awid <= 0;
+    end 
+    else begin
+        if (axi_awgo) begin
+            wr_chipid <= {{`NOC_CHIPID_WIDTH-5 {1'b0}}, s_axi_awaddr[13:9]};
+            wr_noc_vals <= s_axi_awaddr[8:6];
+            aw_recvd <= 1;
+            axi_awid <= s_axi_awid;
+        end
+        else if (dispatch) begin
+            aw_recvd <= 0;
+        end
+    end
+end
+
+// receive data from wdata
+reg [`NOC_DATA_WIDTH-1:0] noc1_indata;
+reg [`NOC_DATA_WIDTH-1:0] noc2_indata;
+reg [`NOC_DATA_WIDTH-1:0] noc3_indata;
+always @(posedge axi_clk) begin
+    if(~axi_rst_n) begin
+        w_recvd <= 0;
+        noc1_indata <= `NOC_DATA_WIDTH'b0;
+        noc2_indata <= `NOC_DATA_WIDTH'b0;
+        noc3_indata <= `NOC_DATA_WIDTH'b0;
+    end 
+    else begin
+        if (axi_wgo) begin
+            w_recvd <= 1;
+            noc1_indata <= s_axi_wdata[2*`NOC_DATA_WIDTH-1:1*`NOC_DATA_WIDTH];
+            noc2_indata <= s_axi_wdata[3*`NOC_DATA_WIDTH-1:2*`NOC_DATA_WIDTH];
+            noc3_indata <= s_axi_wdata[5*`NOC_DATA_WIDTH-1:4*`NOC_DATA_WIDTH];
+        end
+        else if (dispatch) begin
+            w_recvd <= 0;
+        end
+    end
+end
+
+assign s_axi_wready = dispatch | ~w_recvd;
+assign s_axi_awready = dispatch | ~aw_recvd;
+
+
+// send write acks
+reg wr_resp_pending;
+reg [`AXI4_ID_WIDTH-1:0] axi_bid;
+always @(posedge axi_clk) begin
+    if(~axi_rst_n) begin
+        wr_resp_pending <= 0;
+        axi_bid <= 0;
+    end 
+    else begin
+        if (dispatch) begin
+            wr_resp_pending <= 1;
+            axi_bid <= axi_awid;
+        end
+        else if (axi_bgo)
+            wr_resp_pending <= 0;
+    end
+end
+
+
+assign s_axi_bvalid = wr_resp_pending;
+assign s_axi_bid = axi_bid;//6'b100000;
+assign s_axi_bresp = `AXI4_RESP_WIDTH'b0;
+
+
+// NOC part 
+wire noc1_credit;
+wire [`NOC_CHIPID_WIDTH-1:0] noc1_chosen_src;
+axi2noc_noc_part noc1_part (
+    .piton_clk(piton_clk),
+    .piton_rst_n(piton_rst_n),
+    .axi_clk(axi_clk),
+    .axi_rst_n(axi_rst_n),
+    .fpgaid(fpgaid),
+<%
+for i in range(PITON_NUM_CHIPS):
+    print(f'''\
+    .chip{i}_data_val(dispatch & (wr_chipid == {i}) & wr_noc_vals[0]),
+    .chip{i}_data(noc1_indata),
+''')
+print(f'''\
+    .host_data_val(dispatch & (wr_chipid >= {PITON_NUM_CHIPS}) & wr_noc_vals[0]),
+    .host_data(noc1_indata),
+''')
+%>
+
+    // Noc interface
+    .noc_val(noc1_val),
+    .noc_data(noc1_data),
+    .noc_rdy(noc1_rdy), 
+    .noc_credit(noc1_credit),
+    .noc_chosen_src(noc1_chosen_src)
+);
+
+wire noc2_credit;
+wire [`NOC_CHIPID_WIDTH-1:0] noc2_chosen_src;
+axi2noc_noc_part noc2_part (
+    .piton_clk(piton_clk),
+    .piton_rst_n(piton_rst_n),
+    .axi_clk(axi_clk),
+    .axi_rst_n(axi_rst_n),
+    .fpgaid(fpgaid),
+<%
+for i in range(PITON_NUM_CHIPS):
+    print(f'''\
+    .chip{i}_data_val(dispatch & (wr_chipid == {i}) & wr_noc_vals[1]),
+    .chip{i}_data(noc2_indata),
+''')
+print(f'''\
+    .host_data_val(dispatch & (wr_chipid >= {PITON_NUM_CHIPS}) & wr_noc_vals[1]),
+    .host_data(noc2_indata),
+''')
+%>
+
+    // Noc interface
+    .noc_val(noc2_val),
+    .noc_data(noc2_data),
+    .noc_rdy(noc2_rdy), 
+    .noc_credit(noc2_credit),
+    .noc_chosen_src(noc2_chosen_src)
+);
+
+wire noc3_credit;
+wire [`NOC_CHIPID_WIDTH-1:0] noc3_chosen_src;
+axi2noc_noc_part noc3_part (
+    .piton_clk(piton_clk),
+    .piton_rst_n(piton_rst_n),
+    .axi_clk(axi_clk),
+    .axi_rst_n(axi_rst_n),
+    .fpgaid(fpgaid),
+<%
+for i in range(PITON_NUM_CHIPS):
+    print(f'''\
+    .chip{i}_data_val(dispatch & (wr_chipid == {i}) & wr_noc_vals[2]),
+    .chip{i}_data(noc3_indata),
+''')
+print(f'''\
+    .host_data_val(dispatch & (wr_chipid >= {PITON_NUM_CHIPS}) & wr_noc_vals[2]),
+    .host_data(noc3_indata),
+''')
+%>
+
+    // Noc interface
+    .noc_val(noc3_val),
+    .noc_data(noc3_data),
+    .noc_rdy(noc3_rdy), 
+    .noc_credit(noc3_credit),
+    .noc_chosen_src(noc3_chosen_src)
+);
+
+
+// count credits
+axi2noc_credits axi2noc_credits(
+    .axi_clk      (axi_clk), 
+    .axi_rst_n    (axi_rst_n), 
+    .piton_clk    (piton_clk),
+    .piton_rst_n  (piton_rst_n),
+
+    .noc1_chosen_src(noc1_chosen_src), 
+    .noc1_credit    (noc1_credit),    
+    .noc2_chosen_src(noc2_chosen_src), 
+    .noc2_credit    (noc2_credit),
+    .noc3_chosen_src(noc3_chosen_src), 
+    .noc3_credit    (noc3_credit),
+
+    .s_axi_arid    (s_axi_arid), 
+    .s_axi_araddr  (s_axi_araddr), 
+    .s_axi_arlen   (s_axi_arlen), 
+    .s_axi_arsize  (s_axi_arsize), 
+    .s_axi_arvalid (s_axi_arvalid), 
+    .s_axi_arready (s_axi_arready), 
+    .s_axi_rid     (s_axi_rid), 
+    .s_axi_rdata   (s_axi_rdata), 
+    .s_axi_rresp   (s_axi_rresp), 
+    .s_axi_rlast   (s_axi_rlast), 
+    .s_axi_rvalid  (s_axi_rvalid), 
+    .s_axi_rready  (s_axi_rready), 
+
+    .chipid        (chipid)
+);
+
+// `ifdef PITON_FPGA_SYNTH
+// // ila_0 magic_ila3(
+// //     .clk(piton_clk), 
+// //     .probe0(), 
+// //     .probe1({noc3_chosen_src, noc3_chosen_src_next}), 
+// //     .probe2(), 
+// //     .probe3(), 
+// //     .probe4({noc3_flits_left, noc3_fifo_empty}), 
+// //     .probe5()
+// // );
+
+// ila_1 axi2noc_ila (
+//     .clk(axi_clk),
+//     .probe0(s_axi_wready),
+//     .probe1( s_axi_awaddr),
+//     .probe2( s_axi_bresp),
+//     .probe3( s_axi_bvalid),
+//     .probe4( s_axi_bready),
+//     .probe5( noc2_data),
+//     // .probe6( s_axi_rready),
+//     .probe7( s_axi_wvalid),
+//     .probe8( noc2_val),
+//     .probe9( noc2_rdy),
+//     .probe10( noc2_indata),
+//     .probe11( s_axi_awvalid),
+//     .probe12( s_axi_awready),
+//     // .probe13( s_axi_rresp),
+//     .probe14( s_axi_wdata),
+//     .probe15( s_axi_wstrb),
+//     .probe16( w_recvd),
+//     .probe19( s_axi_awid),
+//     .probe20( s_axi_bid),
+//     // .probe25( s_axi_arid),
+//     // .probe38( s_axi_rid),
+//     .probe41( dispatch),
+//     .probe43( aw_recvd)
+// );
+// `endif
+
+endmodule : axi2noc
+
