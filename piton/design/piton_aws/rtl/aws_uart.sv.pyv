@@ -1,0 +1,285 @@
+// Copyright (c) 2023 Princeton University
+// All rights reserved.
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are met:
+//     * Redistributions of source code must retain the above copyright
+//       notice, this list of conditions and the following disclaimer.
+//     * Redistributions in binary form must reproduce the above copyright
+//       notice, this list of conditions and the following disclaimer in the
+//       documentation and/or other materials provided with the distribution.
+//     * Neither the name of Princeton University nor the
+//       names of its contributors may be used to endorse or promote products
+//       derived from this software without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY PRINCETON UNIVERSITY "AS IS" AND
+// ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+// WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+// DISCLAIMED. IN NO EVENT SHALL PRINCETON UNIVERSITY BE LIABLE FOR ANY
+// DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+// (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+// LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+// ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+// SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+`include "axi_defines.vh"
+
+<%
+from pyhplib import *
+%>
+
+module aws_uart(
+    input shell_clk,    // Clock
+    input shell_rst_n,  // Asynchronous reset active low
+
+    input                         awvalid_in,
+    input  [`AXIL_ADDR_WIDTH-1:0] awaddr_in,
+    output                        awready_in,
+    input                         wvalid_in,
+    input  [`AXIL_DATA_WIDTH-1:0] wdata_in,
+    input  [`AXIL_STRB_WIDTH-1:0] wstrb_in,
+    output                        wready_in,
+    output                        bvalid_in,
+    output [`AXIL_RESP_WIDTH-1:0] bresp_in,
+    input                         bready_in,
+    input                         arvalid_in,
+    input  [`AXIL_ADDR_WIDTH-1:0] araddr_in,
+    output                        arready_in,
+    output                        rvalid_in,
+    output [`AXIL_DATA_WIDTH-1:0] rdata_in,
+    output [`AXIL_RESP_WIDTH-1:0] rresp_in,
+    input                         rready_in,
+
+<%
+print(f'''\
+    input                         piton_uart_tx[{PITON_NUM_CHIPS_PER_FPGA-1}:0], 
+    output                        piton_uart_rx[{PITON_NUM_CHIPS_PER_FPGA-1}:0]
+`ifdef PITONSYS_UART_CTS
+    ,
+    output                        piton_uart_ctsn[{PITON_NUM_CHIPS_PER_FPGA-1}:0], 
+    input                         piton_uart_rtsn[{PITON_NUM_CHIPS_PER_FPGA-1}:0]
+`endif
+''')
+%>
+);
+
+// flop axil interface for timing
+
+wire                        awvalid_q;
+wire [`AXIL_ADDR_WIDTH-1:0] awaddr_q;
+wire                        awready_q;
+wire                        wvalid_q;
+wire [`AXIL_DATA_WIDTH-1:0] wdata_q;
+wire [`AXIL_STRB_WIDTH-1:0] wstrb_q;
+wire                        wready_q;
+wire                        bvalid_q;
+wire [`AXIL_RESP_WIDTH-1:0] bresp_q;
+wire                        bready_q;
+wire                        arvalid_q;
+wire [`AXIL_ADDR_WIDTH-1:0] araddr_q;
+wire                        arready_q;
+wire                        rvalid_q;
+wire [`AXIL_DATA_WIDTH-1:0] rdata_q;
+wire [`AXIL_RESP_WIDTH-1:0] rresp_q;
+wire                        rready_q;
+
+axi_register_slice_light axil_flops (
+    .aclk(shell_clk),
+    .aresetn(shell_rst_n),
+
+    .s_axi_awaddr     (awaddr_in ),
+    .s_axi_awvalid    (awvalid_in),
+    .s_axi_awready    (awready_in),
+    .s_axi_wdata      (wdata_in  ),
+    .s_axi_wstrb      (wstrb_in  ),
+    .s_axi_wvalid     (wvalid_in ),
+    .s_axi_wready     (wready_in ),
+    .s_axi_bresp      (bresp_in  ),
+    .s_axi_bvalid     (bvalid_in ),
+    .s_axi_bready     (bready_in ),
+    .s_axi_araddr     (araddr_in ),
+    .s_axi_arvalid    (arvalid_in),
+    .s_axi_arready    (arready_in),
+    .s_axi_rdata      (rdata_in  ),
+    .s_axi_rresp      (rresp_in  ),
+    .s_axi_rvalid     (rvalid_in ),
+    .s_axi_rready     (rready_in ),
+
+    .m_axi_awaddr     (awaddr_q ),
+    .m_axi_awvalid    (awvalid_q),
+    .m_axi_awready    (awready_q),
+    .m_axi_wdata      (wdata_q  ),
+    .m_axi_wstrb      (wstrb_q  ),
+    .m_axi_wvalid     (wvalid_q ),
+    .m_axi_wready     (wready_q ),
+    .m_axi_bresp      (bresp_q  ),
+    .m_axi_bvalid     (bvalid_q ),
+    .m_axi_bready     (bready_q ),
+    .m_axi_araddr     (araddr_q ),
+    .m_axi_arvalid    (arvalid_q),
+    .m_axi_arready    (arready_q),
+    .m_axi_rdata      (rdata_q  ),
+    .m_axi_rresp      (rresp_q  ),
+    .m_axi_rvalid     (rvalid_q ),
+    .m_axi_rready     (rready_q )
+);
+
+<%
+def define_wire(name, width, num):
+    return f'wire [{width}*{num}-1:0] {name};'
+
+print(define_wire('awvalid', '1', PITON_NUM_CHIPS_PER_FPGA))
+print(define_wire('awaddr', '`AXIL_ADDR_WIDTH', PITON_NUM_CHIPS_PER_FPGA))
+print(define_wire('awready', '1', PITON_NUM_CHIPS_PER_FPGA))
+print(define_wire('wvalid', '1', PITON_NUM_CHIPS_PER_FPGA))
+print(define_wire('wdata', '`AXIL_DATA_WIDTH', PITON_NUM_CHIPS_PER_FPGA))
+print(define_wire('wstrb', '`AXIL_STRB_WIDTH', PITON_NUM_CHIPS_PER_FPGA))
+print(define_wire('wready', '1', PITON_NUM_CHIPS_PER_FPGA))
+print(define_wire('bvalid', '1', PITON_NUM_CHIPS_PER_FPGA))
+print(define_wire('bresp', '`AXIL_RESP_WIDTH', PITON_NUM_CHIPS_PER_FPGA))
+print(define_wire('bready', '1', PITON_NUM_CHIPS_PER_FPGA))
+print(define_wire('arvalid', '1', PITON_NUM_CHIPS_PER_FPGA))
+print(define_wire('araddr', '`AXIL_ADDR_WIDTH', PITON_NUM_CHIPS_PER_FPGA))
+print(define_wire('arready', '1', PITON_NUM_CHIPS_PER_FPGA))
+print(define_wire('rvalid', '1', PITON_NUM_CHIPS_PER_FPGA))
+print(define_wire('rdata', '`AXIL_DATA_WIDTH', PITON_NUM_CHIPS_PER_FPGA))
+print(define_wire('rresp', '`AXIL_RESP_WIDTH', PITON_NUM_CHIPS_PER_FPGA))
+print(define_wire('rready', '1', PITON_NUM_CHIPS_PER_FPGA))
+%>
+
+aws_axil_crossbar aws_uart_crossbar (
+  .aclk(shell_clk),
+  .aresetn(shell_rst_n),
+  .s_axi_awaddr(awaddr_q),
+  .s_axi_awprot(`AXIL_PROT_WIDTH'b0),
+  .s_axi_awvalid(awvalid_q),
+  .s_axi_awready(awready_q),
+  .s_axi_wdata(wdata_q),
+  .s_axi_wstrb(wstrb_q),
+  .s_axi_wvalid(wvalid_q),
+  .s_axi_wready(wready_q),
+  .s_axi_bresp(bresp_q),
+  .s_axi_bvalid(bvalid_q),
+  .s_axi_bready(bready_q),
+  .s_axi_araddr(araddr_q),
+  .s_axi_arprot(`AXIL_PROT_WIDTH'b0),
+  .s_axi_arvalid(arvalid_q),
+  .s_axi_arready(arready_q),
+  .s_axi_rdata(rdata_q),
+  .s_axi_rresp(rresp_q),
+  .s_axi_rvalid(rvalid_q),
+  .s_axi_rready(rready_q),
+  .m_axi_awaddr(awaddr),
+  .m_axi_awprot(),
+  .m_axi_awvalid(awvalid),
+  .m_axi_awready(awready),
+  .m_axi_wdata(wdata),
+  .m_axi_wstrb(wstrb),
+  .m_axi_wvalid(wvalid),
+  .m_axi_wready(wready),
+  .m_axi_bresp(bresp),
+  .m_axi_bvalid(bvalid),
+  .m_axi_bready(bready),
+  .m_axi_araddr(araddr),
+  .m_axi_arprot(),
+  .m_axi_arvalid(arvalid),
+  .m_axi_arready(arready),
+  .m_axi_rdata(rdata),
+  .m_axi_rresp(rresp),
+  .m_axi_rvalid(rvalid),
+  .m_axi_rready(rready)
+);
+
+
+
+
+<%
+def use_wire(name, width, index, out):
+    if out:
+        return f's_axi_{name}({name}{index})'
+    else:
+        return f's_axi_{name}({name}[({width}*{i+1})-1:{width}*{i}])'
+
+
+for i in range(PITON_NUM_CHIPS_PER_FPGA):
+    print(define_wire(f'awready{i}', '1', 1))
+    print(define_wire(f'wready{i}', '1', 1))
+    print(define_wire(f'bresp{i}', '`AXIL_RESP_WIDTH', 1))
+    print(define_wire(f'bvalid{i}', '1', 1))
+    print(define_wire(f'arready{i}', '1', 1))
+    print(define_wire(f'rdata{i}', '`AXIL_DATA_WIDTH', 1))
+    print(define_wire(f'rresp{i}', '`AXIL_RESP_WIDTH', 1))
+    print(define_wire(f'rvalid{i}', '1', 1))
+    print('\n')
+
+    print(f'''\
+uart_16550 aws_uart{i} (
+    .s_axi_aclk       (shell_clk        ),
+    .s_axi_aresetn    (shell_rst_n      ),
+    .ip2intc_irpt     (                 ),
+    .freeze           (1'b0             ),
+
+    .{use_wire('awaddr',  '`AXIL_ADDR_WIDTH', i, False)},
+    .{use_wire('awvalid',  '1', i, False)},
+    .{use_wire('awready',  '1', i, True)},
+    .{use_wire('wdata',  '`AXIL_DATA_WIDTH', i, False)},
+    .{use_wire('wstrb',  '`AXIL_STRB_WIDTH', i, False)},
+    .{use_wire('wvalid',  '1', i, False)},
+    .{use_wire('wready',  '1', i, True)},
+    .{use_wire('bresp',  '`AXIL_RESP_WIDTH', i, True)},
+    .{use_wire('bvalid',  '1', i, True)},
+    .{use_wire('bready',  '1', i, False)},
+    .{use_wire('araddr',  '`AXIL_ADDR_WIDTH', i, False)},
+    .{use_wire('arvalid',  '1', i, False)},
+    .{use_wire('arready',  '1', i, True)},
+    .{use_wire('rdata',  '`AXIL_DATA_WIDTH', i, True)},
+    .{use_wire('rresp',  '`AXIL_RESP_WIDTH', i, True)},
+    .{use_wire('rvalid',  '1', i, True)},
+    .{use_wire('rready',  '1', i, False)},
+
+    .baudoutn         (),   
+    .dcdn             (1'b0),  
+    .ddis             (),   
+    .dsrn             (1'b0),  
+    .dtrn             (),   
+    .out1n            (),   
+    .out2n            (),   
+    .rin              (1'b0),  
+    `ifdef PITONSYS_UART_CTS
+    .ctsn             (piton_uart_rtsn[{i}]),  
+    .rtsn             (piton_uart_ctsn[{i}]),  
+    `else
+    .ctsn             (1'b0),  
+    .rtsn             (),   
+    `endif  
+    .rxrdyn           (),   
+    .sin              (piton_uart_tx[{i}]),  
+    .sout             (piton_uart_rx[{i}]),  
+    .txrdyn           ()    
+);
+''')
+
+def assemble_wire(name, width):
+    ret = '}'
+    for i in range(PITON_NUM_CHIPS_PER_FPGA):
+        ret = f', {name}{i}' + ret
+    for i in range(PITON_NUM_CHIPS_PER_FPGA, PITON_NUM_MC_PER_FPGA):
+        ret = f", {width}'b0" + ret
+    ret = ret[2:]
+    ret = f'assign {name} = {{' + ret + ';'
+    return ret
+
+print(assemble_wire('awready', '1'))
+print(assemble_wire('wready', '1'))
+print(assemble_wire('bresp', '`AXIL_RESP_WIDTH'))
+print(assemble_wire('bvalid', '1'))
+print(assemble_wire('arready', '1'))
+print(assemble_wire('rdata', '`AXIL_DATA_WIDTH'))
+print(assemble_wire('rresp', '`AXIL_RESP_WIDTH'))
+print(assemble_wire('rvalid', '1'))
+
+%>
+
+
+endmodule : aws_uart

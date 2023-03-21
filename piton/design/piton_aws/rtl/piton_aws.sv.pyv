@@ -1,0 +1,1691 @@
+// Copyright (c) 2019 Princeton University
+// All rights reserved.
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are met:
+//     * Redistributions of source code must retain the above copyright
+//       notice, this list of conditions and the following disclaimer.
+//     * Redistributions in binary form must reproduce the above copyright
+//       notice, this list of conditions and the following disclaimer in the
+//       documentation and/or other materials provided with the distribution.
+//     * Neither the name of Princeton University nor the
+//       names of its contributors may be used to endorse or promote products
+//       derived from this software without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY PRINCETON UNIVERSITY "AS IS" AND
+// ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+// WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+// DISCLAIMED. IN NO EVENT SHALL PRINCETON UNIVERSITY BE LIABLE FOR ANY
+// DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+// (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+// LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+// ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+// SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+// Filename: piton_aws.sv
+// Author: gchirkov
+// Description: Wrapper over system.v for aws
+
+
+<%
+from pyhplib import *
+%>
+
+`include "define.tmp.h"
+`include "piton_system.vh"
+`include "axi_defines.vh"
+`include "cl_id_defines.vh"
+
+module piton_aws
+(
+	`include "cl_ports.vh"
+);
+
+
+// Including all the unused interface to tie off
+
+`include "unused_apppf_irq_template.inc"
+`include "unused_flr_template.inc"
+
+`ifndef PITONSYS_UART
+    `include "unused_sh_ocl_template.inc"
+`endif
+
+`ifndef PITONSYS_UART2
+    `include "unused_sh_bar1_template.inc"
+`endif
+
+
+`ifdef PITONSYS_NO_MC
+    `include "unused_ddr_c_template.inc"
+`else 
+    `ifndef PITON_FPGA_MC_DDR
+        `include "unused_ddr_c_template.inc"
+    `endif
+`endif
+
+// Unused 'full' signals
+assign cl_sh_dma_rd_full  = 1'b0;
+assign cl_sh_dma_wr_full  = 1'b0;
+
+// Unused
+assign cl_sh_status0 = 32'h0;
+assign cl_sh_status1 = 32'h0;
+
+// Hardcoded vals from Amazon
+assign cl_sh_id0 = `CL_SH_ID0;
+assign cl_sh_id1 = `CL_SH_ID1;
+
+
+///////////////////////////////////////////////////////////////////////
+//////////////////////////// clocks ///////////////////////////////////
+///////////////////////////////////////////////////////////////////////
+
+logic shell_clk;
+logic piton_clk;
+
+assign shell_clk = clk_main_a0; //125 mhz, recipe A0 OR 250 mhz, recipe A1
+
+<%
+if (PITON_SYS_FREQ == int(100e6)):
+    clk = "clk_extra_b1"
+elif (PITON_SYS_FREQ == int(62.5e6)):
+    clk = "clk_extra_a1"
+elif (PITON_SYS_FREQ == int(75e6)):
+    clk = "clk_extra_c0"
+print(f"assign piton_clk = {clk};")
+%>
+
+///////////////////////////////////////////////////////////////////////
+//////////////////////////// clocks ///////////////////////////////////
+///////////////////////////////////////////////////////////////////////
+
+///////////////////////////////////////////////////////////////////////
+//////////////////////////// switches /////////////////////////////////
+///////////////////////////////////////////////////////////////////////
+
+logic [15:0] sw_shell;
+
+switch_stabilizer switch_stabilizer(
+    .clk   (shell_clk), 
+
+    .sw_in (sh_cl_status_vdip), 
+    .sw_out(sw_shell)
+);
+
+
+///////////////////////////////////////////////////////////////////////
+//////////////////////////// switches /////////////////////////////////
+///////////////////////////////////////////////////////////////////////
+
+///////////////////////////////////////////////////////////////////////
+//////////////////////////// resets ///////////////////////////////////
+///////////////////////////////////////////////////////////////////////
+
+<%
+print(f"logic pre_piton_rst_n[{PITON_NUM_CHIPS_PER_FPGA-1}:0];")
+print(f"logic piton_rst_n[{PITON_NUM_CHIPS_PER_FPGA-1}:0];")
+
+for i in range(PITON_NUM_CHIPS_PER_FPGA):
+    print(f'''\
+always_ff @(negedge sw_shell[{15-i}] or posedge piton_clk)
+    if (!sw_shell[{15-i}])
+    begin
+        pre_piton_rst_n[{i}] <= 0;
+        piton_rst_n[{i}] <= 0;
+    end
+    else begin
+        pre_piton_rst_n[{i}] <= 1;
+        piton_rst_n[{i}] <= pre_piton_rst_n[{i}];
+    end
+''')
+
+print(f'''\
+logic pre_interconnect_rst_n;
+logic interconnect_rst_n;
+
+always_ff @(posedge sw_shell[{15-PITON_NUM_CHIPS_PER_FPGA}] or posedge shell_clk)
+    if (sw_shell[{15-PITON_NUM_CHIPS_PER_FPGA}])
+    begin
+        pre_interconnect_rst_n <= 0;
+        interconnect_rst_n <= 0;
+    end
+    else begin
+        pre_interconnect_rst_n <= 1;
+        interconnect_rst_n <= pre_interconnect_rst_n;
+    end
+''')
+%>
+
+logic pre_shell_rst_n;
+logic shell_rst_n;
+
+always_ff @(negedge rst_main_n or posedge shell_clk)
+    if (!rst_main_n)
+    begin
+        pre_shell_rst_n <= 0;
+        shell_rst_n <= 0;
+    end
+    else begin
+        pre_shell_rst_n <= 1;
+        shell_rst_n <= pre_shell_rst_n;
+    end
+
+
+///////////////////////////////////////////////////////////////////////
+//////////////////////////// resets ///////////////////////////////////
+///////////////////////////////////////////////////////////////////////
+
+///////////////////////////////////////////////////////////////////////
+////////////////////// leds and switches //////////////////////////////
+///////////////////////////////////////////////////////////////////////
+
+logic [15:0] sw;
+logic [15:0] sw_q;
+logic [15:0] sw_q_q;
+logic [15:0] leds;
+logic [15:0] leds_q;
+logic [15:0] leds_q_q;
+
+always_ff @(posedge piton_clk)
+   begin
+      sw_q <= sw_shell;
+      sw_q_q <= sw_q;
+   end
+
+always_ff @(posedge shell_clk)
+   begin
+      leds_q <= leds;
+      leds_q_q <= leds_q;
+   end
+
+
+// help close timing
+(* dont_touch = "true" *) logic[15:0] leds_piped;
+lib_pipe #(
+    .WIDTH(16), .STAGES(4)
+) leds_pipe (
+    .clk(shell_clk), 
+    .rst_n(1'b1), 
+    .in_bus(leds_q_q), 
+    .out_bus(leds_piped)
+);
+
+(* dont_touch = "true" *) logic[15:0] sw_piped;
+lib_pipe #(
+    .WIDTH(16), .STAGES(4)
+) sw_pipe (
+    .clk(piton_clk), 
+    .rst_n(1'b1), 
+    .in_bus(sw_q_q), 
+    .out_bus(sw_piped)
+);
+
+assign sw = sw_piped;
+assign cl_sh_status_vled = leds_piped; 
+
+
+///////////////////////////////////////////////////////////////////////
+////////////////////// leds and switches //////////////////////////////
+///////////////////////////////////////////////////////////////////////
+
+///////////////////////////////////////////////////////////////////////
+////////////////////////// config regs ////////////////////////////////
+///////////////////////////////////////////////////////////////////////
+
+
+wire [`NOC_CHIPID_WIDTH-1:0] fpgaid;
+<%
+addr_bases_use_str = ''
+for i in range(PITON_NUM_CHIPS):
+    addr_bases_use_str += f'\t.chip{i}_base(chip{i}_base),\n'
+
+for i in range(PITON_NUM_CHIPS):
+    print(f"wire [`AXI4_ADDR_WIDTH-1:0] chip{i}_base;")
+
+print(f"wire [`AXI4_ADDR_WIDTH-1:0] host_base;")
+
+print(f'''\
+piton_aws_config_regs config_regs(
+    .clk       (shell_clk), 
+    .rst_n     (interconnect_rst_n), 
+
+    .awvalid   (sda_cl_awvalid), 
+    .awaddr    (sda_cl_awaddr), 
+    .awready   (cl_sda_awready), 
+    .wvalid    (sda_cl_wvalid), 
+    .wdata     (sda_cl_wdata), 
+    .wstrb     (sda_cl_wstrb), 
+    .wready    (cl_sda_wready), 
+    .bvalid    (cl_sda_bvalid), 
+    .bresp     (cl_sda_bresp), 
+    .bready    (sda_cl_bready), 
+    .arvalid   (sda_cl_arvalid), 
+    .araddr    (sda_cl_araddr), 
+    .arready   (cl_sda_arready), 
+    .rvalid    (cl_sda_rvalid), 
+    .rdata     (cl_sda_rdata), 
+    .rresp     (cl_sda_rresp), 
+    .rready    (sda_cl_rready), 
+
+    .fpgaid    (fpgaid), 
+{addr_bases_use_str}
+    .host_base (host_base)
+);
+''')
+%>
+
+///////////////////////////////////////////////////////////////////////
+////////////////////////// config regs ////////////////////////////////
+///////////////////////////////////////////////////////////////////////
+
+
+///////////////////////////////////////////////////////////////////////
+////////////////////// dram controllers ///////////////////////////////
+///////////////////////////////////////////////////////////////////////
+
+`ifndef PITONSYS_NO_MC
+`ifdef PITON_FPGA_MC_DDR
+
+<%
+print(f'''\
+logic[`AXI4_ID_WIDTH-1:0] cl_sh_ddr_awid_2d[{PITON_NUM_MC_PER_FPGA-1}:0];
+logic[`AXI4_ADDR_WIDTH-1:0] cl_sh_ddr_awaddr_2d[{PITON_NUM_MC_PER_FPGA-1}:0];
+logic[`AXI4_LEN_WIDTH-1:0] cl_sh_ddr_awlen_2d[{PITON_NUM_MC_PER_FPGA-1}:0];
+logic[`AXI4_SIZE_WIDTH-1:0] cl_sh_ddr_awsize_2d[{PITON_NUM_MC_PER_FPGA-1}:0];
+logic[`AXI4_BURST_WIDTH-1:0] cl_sh_ddr_awburst_2d[{PITON_NUM_MC_PER_FPGA-1}:0];
+logic [{PITON_NUM_MC_PER_FPGA-1}:0] cl_sh_ddr_awvalid_2d;
+logic [{PITON_NUM_MC_PER_FPGA-1}:0] sh_cl_ddr_awready_2d;
+logic[`AXI4_DATA_WIDTH-1:0] cl_sh_ddr_wdata_2d[{PITON_NUM_MC_PER_FPGA-1}:0];
+logic[`AXI4_STRB_WIDTH-1:0] cl_sh_ddr_wstrb_2d[{PITON_NUM_MC_PER_FPGA-1}:0];
+logic [{PITON_NUM_MC_PER_FPGA-1}:0] cl_sh_ddr_wlast_2d;
+logic [{PITON_NUM_MC_PER_FPGA-1}:0] cl_sh_ddr_wvalid_2d;
+logic [{PITON_NUM_MC_PER_FPGA-1}:0] sh_cl_ddr_wready_2d;
+logic[`AXI4_ID_WIDTH-1:0] sh_cl_ddr_bid_2d[{PITON_NUM_MC_PER_FPGA-1}:0];
+logic[`AXI4_RESP_WIDTH-1:0] sh_cl_ddr_bresp_2d[{PITON_NUM_MC_PER_FPGA-1}:0];
+logic [{PITON_NUM_MC_PER_FPGA-1}:0] sh_cl_ddr_bvalid_2d;
+logic [{PITON_NUM_MC_PER_FPGA-1}:0] cl_sh_ddr_bready_2d;
+logic[`AXI4_ID_WIDTH-1:0] cl_sh_ddr_arid_2d[{PITON_NUM_MC_PER_FPGA-1}:0];
+logic[`AXI4_ADDR_WIDTH-1:0] cl_sh_ddr_araddr_2d[{PITON_NUM_MC_PER_FPGA-1}:0];
+logic[`AXI4_LEN_WIDTH-1:0] cl_sh_ddr_arlen_2d[{PITON_NUM_MC_PER_FPGA-1}:0];
+logic[`AXI4_SIZE_WIDTH-1:0] cl_sh_ddr_arsize_2d[{PITON_NUM_MC_PER_FPGA-1}:0];
+logic[`AXI4_BURST_WIDTH-1:0] cl_sh_ddr_arburst_2d[{PITON_NUM_MC_PER_FPGA-1}:0];
+logic [{PITON_NUM_MC_PER_FPGA-1}:0] cl_sh_ddr_arvalid_2d;
+logic [{PITON_NUM_MC_PER_FPGA-1}:0] sh_cl_ddr_arready_2d;
+logic[`AXI4_ID_WIDTH-1:0] sh_cl_ddr_rid_2d[{PITON_NUM_MC_PER_FPGA-1}:0];
+logic[`AXI4_DATA_WIDTH-1:0] sh_cl_ddr_rdata_2d[{PITON_NUM_MC_PER_FPGA-1}:0];
+logic[`AXI4_RESP_WIDTH-1:0] sh_cl_ddr_rresp_2d[{PITON_NUM_MC_PER_FPGA-1}:0];
+logic [{PITON_NUM_MC_PER_FPGA-1}:0] sh_cl_ddr_rlast_2d;
+logic [{PITON_NUM_MC_PER_FPGA-1}:0] sh_cl_ddr_rvalid_2d;
+logic [{PITON_NUM_MC_PER_FPGA-1}:0] cl_sh_ddr_rready_2d;
+logic [{PITON_NUM_MC_PER_FPGA-1}:0] sh_cl_ddr_is_ready_2d;
+''')
+%>
+
+assign cl_sh_ddr_awid = cl_sh_ddr_awid_2d[0];
+assign cl_sh_ddr_awaddr = cl_sh_ddr_awaddr_2d[0];
+assign cl_sh_ddr_awlen = cl_sh_ddr_awlen_2d[0];
+assign cl_sh_ddr_awsize = cl_sh_ddr_awsize_2d[0];
+assign cl_sh_ddr_awburst = cl_sh_ddr_awburst_2d[0];
+assign cl_sh_ddr_awvalid = cl_sh_ddr_awvalid_2d[0];
+assign sh_cl_ddr_awready_2d[0] = sh_cl_ddr_awready;
+assign cl_sh_ddr_wdata = cl_sh_ddr_wdata_2d[0];
+assign cl_sh_ddr_wstrb = cl_sh_ddr_wstrb_2d[0];
+assign cl_sh_ddr_wlast = cl_sh_ddr_wlast_2d[0];
+assign cl_sh_ddr_wvalid = cl_sh_ddr_wvalid_2d[0];
+assign sh_cl_ddr_wready_2d[0] = sh_cl_ddr_wready;
+assign sh_cl_ddr_bid_2d[0] = sh_cl_ddr_bid;
+assign sh_cl_ddr_bresp_2d[0] = sh_cl_ddr_bresp;
+assign sh_cl_ddr_bvalid_2d[0] = sh_cl_ddr_bvalid;
+assign cl_sh_ddr_bready = cl_sh_ddr_bready_2d[0];
+assign cl_sh_ddr_arid = cl_sh_ddr_arid_2d[0];
+assign cl_sh_ddr_araddr = cl_sh_ddr_araddr_2d[0];
+assign cl_sh_ddr_arlen = cl_sh_ddr_arlen_2d[0];
+assign cl_sh_ddr_arsize = cl_sh_ddr_arsize_2d[0];
+assign cl_sh_ddr_arburst = cl_sh_ddr_arburst_2d[0];
+assign cl_sh_ddr_arvalid = cl_sh_ddr_arvalid_2d[0];
+assign sh_cl_ddr_arready_2d[0] = sh_cl_ddr_arready;
+assign sh_cl_ddr_rid_2d[0] = sh_cl_ddr_rid;
+assign sh_cl_ddr_rdata_2d[0] = sh_cl_ddr_rdata;
+assign sh_cl_ddr_rresp_2d[0] = sh_cl_ddr_rresp;
+assign sh_cl_ddr_rlast_2d[0] = sh_cl_ddr_rlast;
+assign sh_cl_ddr_rvalid_2d[0] = sh_cl_ddr_rvalid;
+assign cl_sh_ddr_rready = cl_sh_ddr_rready_2d[0];
+assign sh_cl_ddr_is_ready_2d[0] = sh_cl_ddr_is_ready;
+
+
+// ila_1 ddrc_ila (
+//     .clk(shell_clk),
+//     .probe0(sh_cl_ddr_wready),
+//     .probe1( cl_sh_ddr_awaddr),
+//     .probe2( sh_cl_ddr_bresp),
+//     .probe3( sh_cl_ddr_bvalid),
+//     .probe4( cl_sh_ddr_bready),
+//     .probe5( cl_sh_ddr_araddr),
+//     .probe6( cl_sh_ddr_rready),
+//     .probe7( cl_sh_ddr_wvalid),
+//     .probe8( cl_sh_ddr_arvalid),
+//     .probe9( sh_cl_ddr_arready),
+//     .probe10( sh_cl_ddr_rdata),
+//     .probe11( cl_sh_ddr_awvalid),
+//     .probe12( sh_cl_ddr_awready),
+//     .probe13( sh_cl_ddr_rresp),
+//     .probe14( cl_sh_ddr_wdata),
+//     .probe15( cl_sh_ddr_wstrb),
+//     .probe16( sh_cl_ddr_rvalid),
+//     .probe19( cl_sh_ddr_awid),
+//     .probe20( sh_cl_ddr_bid),
+//     .probe25( cl_sh_ddr_arid),
+//     .probe38( sh_cl_ddr_rid),
+//     .probe41( sh_cl_ddr_rlast),
+//     .probe43( cl_sh_ddr_wlast)
+// );
+
+// help close timing
+
+<%
+print(f'''\
+logic[`AXI4_ID_WIDTH-1:0] cl_sh_ddr_awid_2d_piped[{PITON_NUM_CHIPS_PER_FPGA-1}:0];
+logic[`AXI4_ADDR_WIDTH-1:0] cl_sh_ddr_awaddr_2d_piped[{PITON_NUM_CHIPS_PER_FPGA-1}:0];
+logic[`AXI4_LEN_WIDTH-1:0] cl_sh_ddr_awlen_2d_piped[{PITON_NUM_CHIPS_PER_FPGA-1}:0];
+logic[`AXI4_SIZE_WIDTH-1:0] cl_sh_ddr_awsize_2d_piped[{PITON_NUM_CHIPS_PER_FPGA-1}:0];
+logic[`AXI4_BURST_WIDTH-1:0] cl_sh_ddr_awburst_2d_piped[{PITON_NUM_CHIPS_PER_FPGA-1}:0];
+logic [{PITON_NUM_CHIPS_PER_FPGA-1}:0] cl_sh_ddr_awvalid_2d_piped;
+logic [{PITON_NUM_CHIPS_PER_FPGA-1}:0] sh_cl_ddr_awready_2d_piped;
+logic[`AXI4_DATA_WIDTH-1:0] cl_sh_ddr_wdata_2d_piped[{PITON_NUM_CHIPS_PER_FPGA-1}:0];
+logic[`AXI4_STRB_WIDTH-1:0] cl_sh_ddr_wstrb_2d_piped[{PITON_NUM_CHIPS_PER_FPGA-1}:0];
+logic [{PITON_NUM_CHIPS_PER_FPGA-1}:0] cl_sh_ddr_wlast_2d_piped;
+logic [{PITON_NUM_CHIPS_PER_FPGA-1}:0] cl_sh_ddr_wvalid_2d_piped;
+logic [{PITON_NUM_CHIPS_PER_FPGA-1}:0] sh_cl_ddr_wready_2d_piped;
+logic[`AXI4_ID_WIDTH-1:0] sh_cl_ddr_bid_2d_piped[{PITON_NUM_CHIPS_PER_FPGA-1}:0];
+logic[`AXI4_RESP_WIDTH-1:0] sh_cl_ddr_bresp_2d_piped[{PITON_NUM_CHIPS_PER_FPGA-1}:0];
+logic [{PITON_NUM_CHIPS_PER_FPGA-1}:0] sh_cl_ddr_bvalid_2d_piped;
+logic [{PITON_NUM_CHIPS_PER_FPGA-1}:0] cl_sh_ddr_bready_2d_piped;
+logic[`AXI4_ID_WIDTH-1:0] cl_sh_ddr_arid_2d_piped[{PITON_NUM_CHIPS_PER_FPGA-1}:0];
+logic[`AXI4_ADDR_WIDTH-1:0] cl_sh_ddr_araddr_2d_piped[{PITON_NUM_CHIPS_PER_FPGA-1}:0];
+logic[`AXI4_LEN_WIDTH-1:0] cl_sh_ddr_arlen_2d_piped[{PITON_NUM_CHIPS_PER_FPGA-1}:0];
+logic[`AXI4_SIZE_WIDTH-1:0] cl_sh_ddr_arsize_2d_piped[{PITON_NUM_CHIPS_PER_FPGA-1}:0];
+logic[`AXI4_BURST_WIDTH-1:0] cl_sh_ddr_arburst_2d_piped[{PITON_NUM_CHIPS_PER_FPGA-1}:0];
+logic [{PITON_NUM_CHIPS_PER_FPGA-1}:0] cl_sh_ddr_arvalid_2d_piped;
+logic [{PITON_NUM_CHIPS_PER_FPGA-1}:0] sh_cl_ddr_arready_2d_piped;
+logic[`AXI4_ID_WIDTH-1:0] sh_cl_ddr_rid_2d_piped[{PITON_NUM_CHIPS_PER_FPGA-1}:0];
+logic[`AXI4_DATA_WIDTH-1:0] sh_cl_ddr_rdata_2d_piped[{PITON_NUM_CHIPS_PER_FPGA-1}:0];
+logic[`AXI4_RESP_WIDTH-1:0] sh_cl_ddr_rresp_2d_piped[{PITON_NUM_CHIPS_PER_FPGA-1}:0];
+logic [{PITON_NUM_CHIPS_PER_FPGA-1}:0] sh_cl_ddr_rlast_2d_piped;
+logic [{PITON_NUM_CHIPS_PER_FPGA-1}:0] sh_cl_ddr_rvalid_2d_piped;
+logic [{PITON_NUM_CHIPS_PER_FPGA-1}:0] cl_sh_ddr_rready_2d_piped;
+''')
+
+for i in range(PITON_NUM_CHIPS_PER_FPGA):
+    print(f'''\
+axi_register_slice dram_flops{i} (
+    .aclk          (shell_clk),
+    .aresetn       (interconnect_rst_n),
+
+    .s_axi_awid(cl_sh_ddr_awid_2d_piped[{i}]),
+    .s_axi_awaddr(cl_sh_ddr_awaddr_2d_piped[{i}]),
+    .s_axi_awlen(cl_sh_ddr_awlen_2d_piped[{i}]),
+    .s_axi_awsize(cl_sh_ddr_awsize_2d_piped[{i}]),
+    .s_axi_awburst(cl_sh_ddr_awburst_2d_piped[{i}]),
+    .s_axi_awvalid(cl_sh_ddr_awvalid_2d_piped[{i}]),
+    .s_axi_awready(sh_cl_ddr_awready_2d_piped[{i}]),
+    .s_axi_wdata(cl_sh_ddr_wdata_2d_piped[{i}]),
+    .s_axi_wstrb(cl_sh_ddr_wstrb_2d_piped[{i}]),
+    .s_axi_wlast(cl_sh_ddr_wlast_2d_piped[{i}]),
+    .s_axi_wvalid(cl_sh_ddr_wvalid_2d_piped[{i}]),
+    .s_axi_wready(sh_cl_ddr_wready_2d_piped[{i}]),
+    .s_axi_arid(cl_sh_ddr_arid_2d_piped[{i}]),
+    .s_axi_araddr(cl_sh_ddr_araddr_2d_piped[{i}]),
+    .s_axi_arlen(cl_sh_ddr_arlen_2d_piped[{i}]),
+    .s_axi_arsize(cl_sh_ddr_arsize_2d_piped[{i}]),
+    .s_axi_arburst(cl_sh_ddr_arburst_2d_piped[{i}]),
+    .s_axi_arvalid(cl_sh_ddr_arvalid_2d_piped[{i}]),
+    .s_axi_arready(sh_cl_ddr_arready_2d_piped[{i}]),
+    .s_axi_rid(sh_cl_ddr_rid_2d_piped[{i}]),
+    .s_axi_rdata(sh_cl_ddr_rdata_2d_piped[{i}]),
+    .s_axi_rresp(sh_cl_ddr_rresp_2d_piped[{i}]),
+    .s_axi_rlast(sh_cl_ddr_rlast_2d_piped[{i}]),
+    .s_axi_rvalid(sh_cl_ddr_rvalid_2d_piped[{i}]),
+    .s_axi_rready(cl_sh_ddr_rready_2d_piped[{i}]),
+    .s_axi_bid(sh_cl_ddr_bid_2d_piped[{i}]),
+    .s_axi_bresp(sh_cl_ddr_bresp_2d_piped[{i}]),
+    .s_axi_bvalid(sh_cl_ddr_bvalid_2d_piped[{i}]),
+    .s_axi_bready(cl_sh_ddr_bready_2d_piped[{i}]),
+
+    .m_axi_awid(cl_sh_ddr_awid_2d[{i}]),
+    .m_axi_awaddr(cl_sh_ddr_awaddr_2d[{i}]),
+    .m_axi_awlen(cl_sh_ddr_awlen_2d[{i}]),
+    .m_axi_awsize(cl_sh_ddr_awsize_2d[{i}]),
+    .m_axi_awburst(cl_sh_ddr_awburst_2d[{i}]),
+    .m_axi_awvalid(cl_sh_ddr_awvalid_2d[{i}]),
+    .m_axi_awready(sh_cl_ddr_awready_2d[{i}]),
+    .m_axi_wdata(cl_sh_ddr_wdata_2d[{i}]),
+    .m_axi_wstrb(cl_sh_ddr_wstrb_2d[{i}]),
+    .m_axi_wlast(cl_sh_ddr_wlast_2d[{i}]),
+    .m_axi_wvalid(cl_sh_ddr_wvalid_2d[{i}]),
+    .m_axi_wready(sh_cl_ddr_wready_2d[{i}]),
+    .m_axi_arid(cl_sh_ddr_arid_2d[{i}]),
+    .m_axi_araddr(cl_sh_ddr_araddr_2d[{i}]),
+    .m_axi_arlen(cl_sh_ddr_arlen_2d[{i}]),
+    .m_axi_arsize(cl_sh_ddr_arsize_2d[{i}]),
+    .m_axi_arburst(cl_sh_ddr_arburst_2d[{i}]),
+    .m_axi_arvalid(cl_sh_ddr_arvalid_2d[{i}]),
+    .m_axi_arready(sh_cl_ddr_arready_2d[{i}]),
+    .m_axi_rid(sh_cl_ddr_rid_2d[{i}]),
+    .m_axi_rdata(sh_cl_ddr_rdata_2d[{i}]),
+    .m_axi_rresp(sh_cl_ddr_rresp_2d[{i}]),
+    .m_axi_rlast(sh_cl_ddr_rlast_2d[{i}]),
+    .m_axi_rvalid(sh_cl_ddr_rvalid_2d[{i}]),
+    .m_axi_rready(cl_sh_ddr_rready_2d[{i}]),
+    .m_axi_bid(sh_cl_ddr_bid_2d[{i}]),
+    .m_axi_bresp(sh_cl_ddr_bresp_2d[{i}]),
+    .m_axi_bvalid(sh_cl_ddr_bvalid_2d[{i}]),
+    .m_axi_bready(cl_sh_ddr_bready_2d[{i}])
+);
+''')
+%>
+
+<%
+print(f'(*shreg_extract="no"*) logic [{PITON_NUM_CHIPS_PER_FPGA-1}:0] sh_cl_ddr_is_ready_2d_piped;')
+
+ddr_ready_str = '}'
+for i in range(PITON_NUM_CHIPS_PER_FPGA):
+    ddr_ready_str = f', sh_cl_ddr_is_ready_2d[{i}]' + ddr_ready_str
+ddr_ready_str = '{' + ddr_ready_str[2:]
+
+print(f'''\
+lib_pipe #(
+    .WIDTH({PITON_NUM_CHIPS_PER_FPGA}), .STAGES(4)
+) ddr_ready_pipe (
+    .clk(shell_clk), 
+    .rst_n(shell_rst_n), 
+    .in_bus({ddr_ready_str}), 
+    .out_bus(sh_cl_ddr_is_ready_2d_piped)
+);
+''')
+
+for i in range(0, PITON_NUM_CHIPS_PER_FPGA-1):
+    print(f'''\
+(*shreg_extract="no"*) logic [7:0] sh_ddr_stat_addr{i}_piped;
+(*shreg_extract="no"*) logic sh_ddr_stat_wr{i}_piped;
+(*shreg_extract="no"*) logic sh_ddr_stat_rd{i}_piped; 
+(*shreg_extract="no"*) logic [31:0] sh_ddr_stat_wdata{i}_piped;
+(*shreg_extract="no"*) logic ddr_sh_stat_ack{i}_piped;
+(*shreg_extract="no"*) logic [31:0] ddr_sh_stat_rdata{i}_piped;
+(*shreg_extract="no"*) logic [7:0] ddr_sh_stat_int{i}_piped;
+
+lib_pipe #(
+    .WIDTH(1+1+8+32), 
+    .STAGES(4)
+) ddr_stat{i}_pipe (
+    .clk(shell_clk), 
+    .rst_n(shell_rst_n),
+    .in_bus({{sh_ddr_stat_wr{i}, sh_ddr_stat_rd{i}, sh_ddr_stat_addr{i}, sh_ddr_stat_wdata{i}}}),
+    .out_bus({{sh_ddr_stat_wr{i}_piped, sh_ddr_stat_rd{i}_piped, sh_ddr_stat_addr{i}_piped, sh_ddr_stat_wdata{i}_piped}})
+);
+
+lib_pipe #(
+    .WIDTH(1+8+32), 
+    .STAGES(4)
+) ddr_ack{i}_pipe (
+    .clk(shell_clk), 
+    .rst_n(shell_rst_n),
+    .in_bus({{ddr_sh_stat_ack{i}_piped, ddr_sh_stat_int{i}_piped, ddr_sh_stat_rdata{i}_piped}}),
+    .out_bus({{ddr_sh_stat_ack{i}, ddr_sh_stat_int{i}, ddr_sh_stat_rdata{i}}})
+);
+''')
+
+stupid_fix = f"wire stupid_fix_for_awvalid_2d [{PITON_NUM_MC_PER_FPGA-1}:0] = {{"
+for i in range(PITON_NUM_MC_PER_FPGA):
+    stupid_fix += f"cl_sh_ddr_awvalid_2d[{PITON_NUM_MC_PER_FPGA-i-1}], "
+stupid_fix = stupid_fix[:-2] + "};"
+print(stupid_fix)
+
+
+print(f'''\
+
+
+
+sh_ddr #(
+    .DDR_A_PRESENT({int(PITON_NUM_CHIPS_PER_FPGA > 1)}),
+    .DDR_B_PRESENT({int(PITON_NUM_CHIPS_PER_FPGA > 2)}),
+    .DDR_D_PRESENT({int(PITON_NUM_CHIPS_PER_FPGA > 3)})
+) SH_DDR
+(
+   .clk(shell_clk),
+   .rst_n(shell_rst_n),
+
+   .stat_clk(shell_clk),
+   .stat_rst_n(shell_rst_n),
+
+   //------------------------------------------------------
+   // DDR-4 Interface from CL (AXI-4)
+   //------------------------------------------------------
+   .cl_sh_ddr_awid(cl_sh_ddr_awid_2d[{PITON_NUM_MC_PER_FPGA-1}:1]),
+   .cl_sh_ddr_awaddr(cl_sh_ddr_awaddr_2d[{PITON_NUM_MC_PER_FPGA-1}:1]),
+   .cl_sh_ddr_awlen(cl_sh_ddr_awlen_2d[{PITON_NUM_MC_PER_FPGA-1}:1]),
+   .cl_sh_ddr_awsize(cl_sh_ddr_awsize_2d[{PITON_NUM_MC_PER_FPGA-1}:1]),
+   //.cl_sh_ddr_awvalid(cl_sh_ddr_awvalid_2d[{PITON_NUM_MC_PER_FPGA-1}:1]),
+   .cl_sh_ddr_awvalid(stupid_fix_for_awvalid_2d[{PITON_NUM_MC_PER_FPGA-1}:1]),
+   .cl_sh_ddr_awburst(cl_sh_ddr_awburst_2d[{PITON_NUM_MC_PER_FPGA-1}:1]),
+   .sh_cl_ddr_awready(sh_cl_ddr_awready_2d[{PITON_NUM_MC_PER_FPGA-1}:1]),
+   .cl_sh_ddr_wid(),
+   .cl_sh_ddr_wdata(cl_sh_ddr_wdata_2d[{PITON_NUM_MC_PER_FPGA-1}:1]),
+   .cl_sh_ddr_wstrb(cl_sh_ddr_wstrb_2d[{PITON_NUM_MC_PER_FPGA-1}:1]),
+   .cl_sh_ddr_wlast(cl_sh_ddr_wlast_2d[{PITON_NUM_MC_PER_FPGA-1}:1]),
+   .cl_sh_ddr_wvalid(cl_sh_ddr_wvalid_2d[{PITON_NUM_MC_PER_FPGA-1}:1]),
+   .sh_cl_ddr_wready(sh_cl_ddr_wready_2d[{PITON_NUM_MC_PER_FPGA-1}:1]),
+   .sh_cl_ddr_bid(sh_cl_ddr_bid_2d[{PITON_NUM_MC_PER_FPGA-1}:1]),
+   .sh_cl_ddr_bresp(sh_cl_ddr_bresp_2d[{PITON_NUM_MC_PER_FPGA-1}:1]),
+   .sh_cl_ddr_bvalid(sh_cl_ddr_bvalid_2d[{PITON_NUM_MC_PER_FPGA-1}:1]),
+   .cl_sh_ddr_bready(cl_sh_ddr_bready_2d[{PITON_NUM_MC_PER_FPGA-1}:1]),
+   .cl_sh_ddr_arid(cl_sh_ddr_arid_2d[{PITON_NUM_MC_PER_FPGA-1}:1]),
+   .cl_sh_ddr_araddr(cl_sh_ddr_araddr_2d[{PITON_NUM_MC_PER_FPGA-1}:1]),
+   .cl_sh_ddr_arlen(cl_sh_ddr_arlen_2d[{PITON_NUM_MC_PER_FPGA-1}:1]),
+   .cl_sh_ddr_arsize(cl_sh_ddr_arsize_2d[{PITON_NUM_MC_PER_FPGA-1}:1]),
+   .cl_sh_ddr_arvalid(cl_sh_ddr_arvalid_2d[{PITON_NUM_MC_PER_FPGA-1}:1]),
+   .cl_sh_ddr_arburst(cl_sh_ddr_arburst_2d[{PITON_NUM_MC_PER_FPGA-1}:1]),
+   .sh_cl_ddr_arready(sh_cl_ddr_arready_2d[{PITON_NUM_MC_PER_FPGA-1}:1]),
+   .sh_cl_ddr_rid(sh_cl_ddr_rid_2d[{PITON_NUM_MC_PER_FPGA-1}:1]),
+   .sh_cl_ddr_rdata(sh_cl_ddr_rdata_2d[{PITON_NUM_MC_PER_FPGA-1}:1]),
+   .sh_cl_ddr_rresp(sh_cl_ddr_rresp_2d[{PITON_NUM_MC_PER_FPGA-1}:1]),
+   .sh_cl_ddr_rlast(sh_cl_ddr_rlast_2d[{PITON_NUM_MC_PER_FPGA-1}:1]),
+   .sh_cl_ddr_rvalid(sh_cl_ddr_rvalid_2d[{PITON_NUM_MC_PER_FPGA-1}:1]),
+   .cl_sh_ddr_rready(cl_sh_ddr_rready_2d[{PITON_NUM_MC_PER_FPGA-1}:1]),
+   .sh_cl_ddr_is_ready(sh_cl_ddr_is_ready_2d[{PITON_NUM_MC_PER_FPGA-1}:1]),
+''')
+
+for i in range(PITON_NUM_CHIPS_PER_FPGA-1):
+    print(f'''\
+   .ddr_sh_stat_ack{i}   (ddr_sh_stat_ack{i}_piped    ),
+   .ddr_sh_stat_rdata{i} (ddr_sh_stat_rdata{i}_piped  ),
+   .ddr_sh_stat_int{i}   (ddr_sh_stat_int{i}_piped    ),
+   .sh_ddr_stat_addr{i}  (sh_ddr_stat_addr{i}_piped   ),
+   .sh_ddr_stat_wr{i}    (sh_ddr_stat_wr{i}_piped     ),
+   .sh_ddr_stat_rd{i}    (sh_ddr_stat_rd{i}_piped     ),
+   .sh_ddr_stat_wdata{i} (sh_ddr_stat_wdata{i}_piped  ),
+''')
+for i in range(PITON_NUM_CHIPS_PER_FPGA-1, PITON_NUM_MC_PER_FPGA-1):
+    print(f'''\
+   .sh_ddr_stat_addr{i}  (0  ),
+   .sh_ddr_stat_wr{i}    (0  ),
+   .sh_ddr_stat_rd{i}    (0  ),
+   .sh_ddr_stat_wdata{i} (0  ),
+''')
+
+print(f'''
+   .CLK_300M_DIMM0_DP(CLK_300M_DIMM0_DP),
+   .CLK_300M_DIMM0_DN(CLK_300M_DIMM0_DN),
+   .M_A_ACT_N(M_A_ACT_N),
+   .M_A_MA(M_A_MA),
+   .M_A_BA(M_A_BA),
+   .M_A_BG(M_A_BG),
+   .M_A_CKE(M_A_CKE),
+   .M_A_ODT(M_A_ODT),
+   .M_A_CS_N(M_A_CS_N),
+   .M_A_CLK_DN(M_A_CLK_DN),
+   .M_A_CLK_DP(M_A_CLK_DP),
+   .M_A_PAR(M_A_PAR),
+   .M_A_DQ(M_A_DQ),
+   .M_A_ECC(M_A_ECC),
+   .M_A_DQS_DP(M_A_DQS_DP),
+   .M_A_DQS_DN(M_A_DQS_DN),
+   .cl_RST_DIMM_A_N(cl_RST_DIMM_A_N),
+   
+   .CLK_300M_DIMM1_DP(CLK_300M_DIMM1_DP),
+   .CLK_300M_DIMM1_DN(CLK_300M_DIMM1_DN),
+   .M_B_ACT_N(M_B_ACT_N),
+   .M_B_MA(M_B_MA),
+   .M_B_BA(M_B_BA),
+   .M_B_BG(M_B_BG),
+   .M_B_CKE(M_B_CKE),
+   .M_B_ODT(M_B_ODT),
+   .M_B_CS_N(M_B_CS_N),
+   .M_B_CLK_DN(M_B_CLK_DN),
+   .M_B_CLK_DP(M_B_CLK_DP),
+   .M_B_PAR(M_B_PAR),
+   .M_B_DQ(M_B_DQ),
+   .M_B_ECC(M_B_ECC),
+   .M_B_DQS_DP(M_B_DQS_DP),
+   .M_B_DQS_DN(M_B_DQS_DN),
+   .cl_RST_DIMM_B_N(cl_RST_DIMM_B_N),
+
+   .CLK_300M_DIMM3_DP(CLK_300M_DIMM3_DP),
+   .CLK_300M_DIMM3_DN(CLK_300M_DIMM3_DN),
+   .M_D_ACT_N(M_D_ACT_N),
+   .M_D_MA(M_D_MA),
+   .M_D_BA(M_D_BA),
+   .M_D_BG(M_D_BG),
+   .M_D_CKE(M_D_CKE),
+   .M_D_ODT(M_D_ODT),
+   .M_D_CS_N(M_D_CS_N),
+   .M_D_CLK_DN(M_D_CLK_DN),
+   .M_D_CLK_DP(M_D_CLK_DP),
+   .M_D_PAR(M_D_PAR),
+   .M_D_DQ(M_D_DQ),
+   .M_D_ECC(M_D_ECC),
+   .M_D_DQS_DP(M_D_DQS_DP),
+   .M_D_DQS_DN(M_D_DQS_DN),
+   .cl_RST_DIMM_D_N(cl_RST_DIMM_D_N)
+);
+''')
+
+for i in range(PITON_NUM_CHIPS_PER_FPGA-1, PITON_NUM_MC_PER_FPGA-1):
+    print(f'''\
+assign ddr_sh_stat_ack{i} = 1;
+assign ddr_sh_stat_rdata{i} = 0;
+assign ddr_sh_stat_int{i} = 0;
+''')
+
+%>
+`endif
+`endif
+
+
+///////////////////////////////////////////////////////////////////////
+////////////////////// dram controllers ///////////////////////////////
+///////////////////////////////////////////////////////////////////////
+
+
+///////////////////////////////////////////////////////////////////////
+/////////////////////////// piton /////////////////////////////////////
+///////////////////////////////////////////////////////////////////////
+
+// For uart
+<%
+print(f'''\
+`ifdef PITONSYS_UART
+    logic piton_uart_tx[{PITON_NUM_CHIPS_PER_FPGA-1}:0];
+    logic piton_uart_rx[{PITON_NUM_CHIPS_PER_FPGA-1}:0];
+    `ifdef PITONSYS_UART_CTS
+        logic piton_uart_ctsn[{PITON_NUM_CHIPS_PER_FPGA-1}:0];
+        logic piton_uart_rtsn[{PITON_NUM_CHIPS_PER_FPGA-1}:0];
+    `endif
+    `ifdef PITONSYS_UART2
+        logic piton_uart2_tx[{PITON_NUM_CHIPS_PER_FPGA-1}:0];
+        logic piton_uart2_rx[{PITON_NUM_CHIPS_PER_FPGA-1}:0];
+        `ifdef PITONSYS_UART_CTS
+            logic piton_uart2_ctsn[{PITON_NUM_CHIPS_PER_FPGA-1}:0];
+            logic piton_uart2_rtsn[{PITON_NUM_CHIPS_PER_FPGA-1}:0];
+        `endif
+    `endif
+`endif
+''')
+%>
+
+<%
+for i in range(0, PITON_NUM_CHIPS_PER_FPGA):
+    if PITON_NUM_CHIPS_SM == 1:
+        chipid_str = f".chipid         (fpgaid * {PITON_NUM_CHIPS_PER_FPGA} + `NOC_CHIPID_WIDTH'h{0})"
+    else:
+        chipid_str = f".chipid         (fpgaid * {PITON_NUM_CHIPS_PER_FPGA} + `NOC_CHIPID_WIDTH'h{i})"
+    print(f'''\
+
+wire                       multichip{i}_out_noc1_valid;
+wire [`NOC_DATA_WIDTH-1:0] multichip{i}_out_noc1_data;
+wire                       multichip{i}_out_noc1_ready;
+wire                       multichip{i}_out_noc2_valid;
+wire [`NOC_DATA_WIDTH-1:0] multichip{i}_out_noc2_data;
+wire                       multichip{i}_out_noc2_ready;
+wire                       multichip{i}_out_noc3_valid;
+wire [`NOC_DATA_WIDTH-1:0] multichip{i}_out_noc3_data;
+wire                       multichip{i}_out_noc3_ready;
+
+logic [`AXI4_ID_WIDTH-1:0]    multichip{i}_out_awid;
+logic [`AXI4_ADDR_WIDTH-1:0]  multichip{i}_out_awaddr;
+logic [`AXI4_LEN_WIDTH-1:0]   multichip{i}_out_awlen;
+logic [`AXI4_SIZE_WIDTH-1:0]  multichip{i}_out_awsize;
+logic                         multichip{i}_out_awvalid;
+logic                         multichip{i}_out_awready;
+logic [`AXI4_DATA_WIDTH-1:0]  multichip{i}_out_wdata;
+logic [`AXI4_STRB_WIDTH-1:0]  multichip{i}_out_wstrb;
+logic                         multichip{i}_out_wlast;
+logic                         multichip{i}_out_wvalid;
+logic                         multichip{i}_out_wready;
+logic [`AXI4_ID_WIDTH-1:0]    multichip{i}_out_bid;
+logic [`AXI4_RESP_WIDTH-1:0]  multichip{i}_out_bresp;
+logic                         multichip{i}_out_bvalid;
+logic                         multichip{i}_out_bready;
+logic [`AXI4_ID_WIDTH-1:0]    multichip{i}_out_arid;
+logic [`AXI4_ADDR_WIDTH-1:0]  multichip{i}_out_araddr;
+logic [`AXI4_LEN_WIDTH-1:0]   multichip{i}_out_arlen;
+logic [`AXI4_SIZE_WIDTH-1:0]  multichip{i}_out_arsize;
+logic                         multichip{i}_out_arvalid;
+logic                         multichip{i}_out_arready;
+logic [`AXI4_ID_WIDTH-1:0]    multichip{i}_out_rid;
+logic [`AXI4_DATA_WIDTH-1:0]  multichip{i}_out_rdata;
+logic [`AXI4_RESP_WIDTH-1:0]  multichip{i}_out_rresp;
+logic                         multichip{i}_out_rlast;
+logic                         multichip{i}_out_rvalid;
+logic                         multichip{i}_out_rready;
+
+logic [`AXI4_ID_WIDTH-1:0]    multichip{i}_out_awid_piped;
+logic [`AXI4_ADDR_WIDTH-1:0]  multichip{i}_out_awaddr_piped;
+logic [`AXI4_LEN_WIDTH-1:0]   multichip{i}_out_awlen_piped;
+logic [`AXI4_SIZE_WIDTH-1:0]  multichip{i}_out_awsize_piped;
+logic                         multichip{i}_out_awvalid_piped;
+logic                         multichip{i}_out_awready_piped;
+logic [`AXI4_DATA_WIDTH-1:0]  multichip{i}_out_wdata_piped;
+logic [`AXI4_STRB_WIDTH-1:0]  multichip{i}_out_wstrb_piped;
+logic                         multichip{i}_out_wlast_piped;
+logic                         multichip{i}_out_wvalid_piped;
+logic                         multichip{i}_out_wready_piped;
+logic [`AXI4_ID_WIDTH-1:0]    multichip{i}_out_bid_piped;
+logic [`AXI4_RESP_WIDTH-1:0]  multichip{i}_out_bresp_piped;
+logic                         multichip{i}_out_bvalid_piped;
+logic                         multichip{i}_out_bready_piped;
+logic [`AXI4_ID_WIDTH-1:0]    multichip{i}_out_arid_piped;
+logic [`AXI4_ADDR_WIDTH-1:0]  multichip{i}_out_araddr_piped;
+logic [`AXI4_LEN_WIDTH-1:0]   multichip{i}_out_arlen_piped;
+logic [`AXI4_SIZE_WIDTH-1:0]  multichip{i}_out_arsize_piped;
+logic                         multichip{i}_out_arvalid_piped;
+logic                         multichip{i}_out_arready_piped;
+logic [`AXI4_ID_WIDTH-1:0]    multichip{i}_out_rid_piped;
+logic [`AXI4_DATA_WIDTH-1:0]  multichip{i}_out_rdata_piped;
+logic [`AXI4_RESP_WIDTH-1:0]  multichip{i}_out_rresp_piped;
+logic                         multichip{i}_out_rlast_piped;
+logic                         multichip{i}_out_rvalid_piped;
+logic                         multichip{i}_out_rready_piped;
+
+
+// ila_1 multichip{i}_out_ila (
+//     .clk(shell_clk),
+//     .probe0(multichip{i}_out_wready),
+//     .probe1( multichip{i}_out_awaddr),
+//     .probe2( multichip{i}_out_bresp),
+//     .probe3( multichip{i}_out_bvalid),
+//     .probe4( multichip{i}_out_bready),
+//     .probe5( multichip{i}_out_araddr),
+//     .probe6( multichip{i}_out_rready),
+//     .probe7( multichip{i}_out_wvalid),
+//     .probe8( multichip{i}_out_arvalid),
+//     .probe9( multichip{i}_out_arready),
+//     .probe10( multichip{i}_out_rdata),
+//     .probe11( multichip{i}_out_awvalid),
+//     .probe12( multichip{i}_out_awready),
+//     .probe13( multichip{i}_out_rresp),
+//     .probe14( multichip{i}_out_wdata),
+//     .probe15( multichip{i}_out_wstrb),
+//     .probe16( multichip{i}_out_rvalid),
+//     .probe19( multichip{i}_out_awid),
+//     .probe20( multichip{i}_out_bid),
+//     .probe25( multichip{i}_out_arid),
+//     .probe38( multichip{i}_out_rid),
+//     .probe41( multichip{i}_out_rlast),
+//     .probe43( multichip{i}_out_wlast)
+// );
+
+noc2axi noc2axi{i}(
+    .piton_clk            (piton_clk), 
+    .piton_rst_n          (piton_rst_n[{i}]), 
+    .axi_clk              (shell_clk),
+    .axi_rst_n            (interconnect_rst_n),
+
+    .noc1_data      (multichip{i}_out_noc1_data),
+    .noc1_val       (multichip{i}_out_noc1_valid),
+    .noc1_rdy       (multichip{i}_out_noc1_ready),
+    .noc2_data      (multichip{i}_out_noc2_data),
+    .noc2_val       (multichip{i}_out_noc2_valid),
+    .noc2_rdy       (multichip{i}_out_noc2_ready),
+    .noc3_data      (multichip{i}_out_noc3_data),
+    .noc3_val       (multichip{i}_out_noc3_valid),
+    .noc3_rdy       (multichip{i}_out_noc3_ready),
+
+    .m_axi_awid     (multichip{i}_out_awid),
+    .m_axi_awaddr   (multichip{i}_out_awaddr),
+    .m_axi_awlen    (multichip{i}_out_awlen),
+    .m_axi_awsize   (multichip{i}_out_awsize),
+    .m_axi_awvalid  (multichip{i}_out_awvalid),
+    .m_axi_awready  (multichip{i}_out_awready),
+    .m_axi_wdata    (multichip{i}_out_wdata),
+    .m_axi_wstrb    (multichip{i}_out_wstrb),
+    .m_axi_wlast    (multichip{i}_out_wlast),
+    .m_axi_wvalid   (multichip{i}_out_wvalid),
+    .m_axi_wready   (multichip{i}_out_wready),
+    .m_axi_arid     (multichip{i}_out_arid),
+    .m_axi_araddr   (multichip{i}_out_araddr),
+    .m_axi_arlen    (multichip{i}_out_arlen),
+    .m_axi_arsize   (multichip{i}_out_arsize),
+    .m_axi_arvalid  (multichip{i}_out_arvalid),
+    .m_axi_arready  (multichip{i}_out_arready),
+    .m_axi_rid      (multichip{i}_out_rid),
+    .m_axi_rdata    (multichip{i}_out_rdata),
+    .m_axi_rresp    (multichip{i}_out_rresp),
+    .m_axi_rlast    (multichip{i}_out_rlast),
+    .m_axi_rvalid   (multichip{i}_out_rvalid),
+    .m_axi_rready   (multichip{i}_out_rready),
+    .m_axi_bid      (multichip{i}_out_bid),
+    .m_axi_bresp    (multichip{i}_out_bresp),
+    .m_axi_bvalid   (multichip{i}_out_bvalid),
+    .m_axi_bready   (multichip{i}_out_bready),
+    {chipid_str},
+
+{addr_bases_use_str}
+
+    .host_base      (host_base)
+);
+
+axi_register_slice multichip_out_flops{i} (
+    .aclk          (shell_clk),
+    .aresetn       (interconnect_rst_n),
+
+    .s_axi_awid   (multichip{i}_out_awid),
+    .s_axi_awaddr (multichip{i}_out_awaddr),
+    .s_axi_awlen  (multichip{i}_out_awlen),
+    .s_axi_awsize (multichip{i}_out_awsize),
+    .s_axi_awburst(`AXI4_BURST_WIDTH'd1),
+    .s_axi_awvalid(multichip{i}_out_awvalid),
+    .s_axi_awready(multichip{i}_out_awready),
+    .s_axi_wdata  (multichip{i}_out_wdata),
+    .s_axi_wstrb  (multichip{i}_out_wstrb),
+    .s_axi_wlast  (multichip{i}_out_wlast),
+    .s_axi_wvalid (multichip{i}_out_wvalid),
+    .s_axi_wready (multichip{i}_out_wready),
+    .s_axi_arid   (multichip{i}_out_arid),
+    .s_axi_araddr (multichip{i}_out_araddr),
+    .s_axi_arlen  (multichip{i}_out_arlen),
+    .s_axi_arsize (multichip{i}_out_arsize),
+    .s_axi_arburst(`AXI4_BURST_WIDTH'd1),
+    .s_axi_arvalid(multichip{i}_out_arvalid),
+    .s_axi_arready(multichip{i}_out_arready),
+    .s_axi_rid    (multichip{i}_out_rid),
+    .s_axi_rdata  (multichip{i}_out_rdata),
+    .s_axi_rresp  (multichip{i}_out_rresp),
+    .s_axi_rlast  (multichip{i}_out_rlast),
+    .s_axi_rvalid (multichip{i}_out_rvalid),
+    .s_axi_rready (multichip{i}_out_rready),
+    .s_axi_bid    (multichip{i}_out_bid),
+    .s_axi_bresp  (multichip{i}_out_bresp),
+    .s_axi_bvalid (multichip{i}_out_bvalid),
+    .s_axi_bready (multichip{i}_out_bready),
+
+    .m_axi_awid     (multichip{i}_out_awid_piped),
+    .m_axi_awaddr   (multichip{i}_out_awaddr_piped),
+    .m_axi_awlen    (multichip{i}_out_awlen_piped),
+    .m_axi_awsize   (multichip{i}_out_awsize_piped),
+    .m_axi_awvalid  (multichip{i}_out_awvalid_piped),
+    .m_axi_awready  (multichip{i}_out_awready_piped),
+    .m_axi_wdata    (multichip{i}_out_wdata_piped),
+    .m_axi_wstrb    (multichip{i}_out_wstrb_piped),
+    .m_axi_wlast    (multichip{i}_out_wlast_piped),
+    .m_axi_wvalid   (multichip{i}_out_wvalid_piped),
+    .m_axi_wready   (multichip{i}_out_wready_piped),
+    .m_axi_arid     (multichip{i}_out_arid_piped),
+    .m_axi_araddr   (multichip{i}_out_araddr_piped),
+    .m_axi_arlen    (multichip{i}_out_arlen_piped),
+    .m_axi_arsize   (multichip{i}_out_arsize_piped),
+    .m_axi_arvalid  (multichip{i}_out_arvalid_piped),
+    .m_axi_arready  (multichip{i}_out_arready_piped),
+    .m_axi_rid      (multichip{i}_out_rid_piped),
+    .m_axi_rdata    (multichip{i}_out_rdata_piped),
+    .m_axi_rresp    (multichip{i}_out_rresp_piped),
+    .m_axi_rlast    (multichip{i}_out_rlast_piped),
+    .m_axi_rvalid   (multichip{i}_out_rvalid_piped),
+    .m_axi_rready   (multichip{i}_out_rready_piped),
+    .m_axi_bid      (multichip{i}_out_bid_piped),
+    .m_axi_bresp    (multichip{i}_out_bresp_piped),
+    .m_axi_bvalid   (multichip{i}_out_bvalid_piped),
+    .m_axi_bready   (multichip{i}_out_bready_piped)
+);
+
+wire                       multichip{i}_in_noc1_valid;
+wire [`NOC_DATA_WIDTH-1:0] multichip{i}_in_noc1_data;
+wire                       multichip{i}_in_noc1_ready;
+wire                       multichip{i}_in_noc2_valid;
+wire [`NOC_DATA_WIDTH-1:0] multichip{i}_in_noc2_data;
+wire                       multichip{i}_in_noc2_ready;
+wire                       multichip{i}_in_noc3_valid;
+wire [`NOC_DATA_WIDTH-1:0] multichip{i}_in_noc3_data;
+wire                       multichip{i}_in_noc3_ready;
+
+logic [`AXI4_ID_WIDTH-1:0]    multichip{i}_in_awid;
+logic [`AXI4_ADDR_WIDTH-1:0]  multichip{i}_in_awaddr;
+logic [`AXI4_LEN_WIDTH-1:0]   multichip{i}_in_awlen;
+logic [`AXI4_SIZE_WIDTH-1:0]  multichip{i}_in_awsize;
+logic                         multichip{i}_in_awvalid;
+logic                         multichip{i}_in_awready;
+logic [`AXI4_DATA_WIDTH-1:0]  multichip{i}_in_wdata;
+logic [`AXI4_STRB_WIDTH-1:0]  multichip{i}_in_wstrb;
+logic                         multichip{i}_in_wlast;
+logic                         multichip{i}_in_wvalid;
+logic                         multichip{i}_in_wready;
+logic [`AXI4_ID_WIDTH-1:0]    multichip{i}_in_bid;
+logic [`AXI4_RESP_WIDTH-1:0]  multichip{i}_in_bresp;
+logic                         multichip{i}_in_bvalid;
+logic                         multichip{i}_in_bready;
+logic [`AXI4_ID_WIDTH-1:0]    multichip{i}_in_arid;
+logic [`AXI4_ADDR_WIDTH-1:0]  multichip{i}_in_araddr;
+logic [`AXI4_LEN_WIDTH-1:0]   multichip{i}_in_arlen;
+logic [`AXI4_SIZE_WIDTH-1:0]  multichip{i}_in_arsize;
+logic                         multichip{i}_in_arvalid;
+logic                         multichip{i}_in_arready;
+logic [`AXI4_ID_WIDTH-1:0]    multichip{i}_in_rid;
+logic [`AXI4_DATA_WIDTH-1:0]  multichip{i}_in_rdata;
+logic [`AXI4_RESP_WIDTH-1:0]  multichip{i}_in_rresp;
+logic                         multichip{i}_in_rlast;
+logic                         multichip{i}_in_rvalid;
+logic                         multichip{i}_in_rready;
+
+logic [`AXI4_ID_WIDTH-1:0]    multichip{i}_in_awid_piped;
+logic [`AXI4_ADDR_WIDTH-1:0]  multichip{i}_in_awaddr_piped;
+logic [`AXI4_LEN_WIDTH-1:0]   multichip{i}_in_awlen_piped;
+logic [`AXI4_SIZE_WIDTH-1:0]  multichip{i}_in_awsize_piped;
+logic                         multichip{i}_in_awvalid_piped;
+logic                         multichip{i}_in_awready_piped;
+logic [`AXI4_DATA_WIDTH-1:0]  multichip{i}_in_wdata_piped;
+logic [`AXI4_STRB_WIDTH-1:0]  multichip{i}_in_wstrb_piped;
+logic                         multichip{i}_in_wlast_piped;
+logic                         multichip{i}_in_wvalid_piped;
+logic                         multichip{i}_in_wready_piped;
+logic [`AXI4_ID_WIDTH-1:0]    multichip{i}_in_bid_piped;
+logic [`AXI4_RESP_WIDTH-1:0]  multichip{i}_in_bresp_piped;
+logic                         multichip{i}_in_bvalid_piped;
+logic                         multichip{i}_in_bready_piped;
+logic [`AXI4_ID_WIDTH-1:0]    multichip{i}_in_arid_piped;
+logic [`AXI4_ADDR_WIDTH-1:0]  multichip{i}_in_araddr_piped;
+logic [`AXI4_LEN_WIDTH-1:0]   multichip{i}_in_arlen_piped;
+logic [`AXI4_SIZE_WIDTH-1:0]  multichip{i}_in_arsize_piped;
+logic                         multichip{i}_in_arvalid_piped;
+logic                         multichip{i}_in_arready_piped;
+logic [`AXI4_ID_WIDTH-1:0]    multichip{i}_in_rid_piped;
+logic [`AXI4_DATA_WIDTH-1:0]  multichip{i}_in_rdata_piped;
+logic [`AXI4_RESP_WIDTH-1:0]  multichip{i}_in_rresp_piped;
+logic                         multichip{i}_in_rlast_piped;
+logic                         multichip{i}_in_rvalid_piped;
+logic                         multichip{i}_in_rready_piped;
+
+
+// ila_1 multichip{i}_in_ila (
+//     .clk(shell_clk),
+//     .probe0(multichip{i}_in_wready),
+//     .probe1( multichip{i}_in_awaddr),
+//     .probe2( multichip{i}_in_bresp),
+//     .probe3( multichip{i}_in_bvalid),
+//     .probe4( multichip{i}_in_bready),
+//     .probe5( multichip{i}_in_araddr),
+//     .probe6( multichip{i}_in_rready),
+//     .probe7( multichip{i}_in_wvalid),
+//     .probe8( multichip{i}_in_arvalid),
+//     .probe9( multichip{i}_in_arready),
+//     .probe10( multichip{i}_in_rdata),
+//     .probe11( multichip{i}_in_awvalid),
+//     .probe12( multichip{i}_in_awready),
+//     .probe13( multichip{i}_in_rresp),
+//     .probe14( multichip{i}_in_wdata),
+//     .probe15( multichip{i}_in_wstrb),
+//     .probe16( multichip{i}_in_rvalid),
+//     .probe19( multichip{i}_in_awid),
+//     .probe20( multichip{i}_in_bid),
+//     .probe25( multichip{i}_in_arid),
+//     .probe38( multichip{i}_in_rid),
+//     .probe41( multichip{i}_in_rlast),
+//     .probe43( multichip{i}_in_wlast)
+// );
+
+axi2noc axi2noc{i}(
+    .piton_clk            (piton_clk), 
+    .piton_rst_n          (piton_rst_n[{i}]), 
+    .axi_clk              (shell_clk),
+    .axi_rst_n            (interconnect_rst_n),
+
+    .noc1_val       (multichip{i}_in_noc1_valid), 
+    .noc1_data      (multichip{i}_in_noc1_data), 
+    .noc1_rdy       (multichip{i}_in_noc1_ready), 
+    .noc2_val       (multichip{i}_in_noc2_valid), 
+    .noc2_data      (multichip{i}_in_noc2_data), 
+    .noc2_rdy       (multichip{i}_in_noc2_ready), 
+    .noc3_val       (multichip{i}_in_noc3_valid), 
+    .noc3_data      (multichip{i}_in_noc3_data), 
+    .noc3_rdy       (multichip{i}_in_noc3_ready), 
+
+    .s_axi_awid     (multichip{i}_in_awid),
+    .s_axi_awaddr   (multichip{i}_in_awaddr),
+    .s_axi_awlen    (multichip{i}_in_awlen),
+    .s_axi_awsize   (multichip{i}_in_awsize),
+    .s_axi_awvalid  (multichip{i}_in_awvalid),
+    .s_axi_awready  (multichip{i}_in_awready),
+    .s_axi_wdata    (multichip{i}_in_wdata),
+    .s_axi_wstrb    (multichip{i}_in_wstrb),
+    .s_axi_wlast    (multichip{i}_in_wlast),
+    .s_axi_wvalid   (multichip{i}_in_wvalid),
+    .s_axi_wready   (multichip{i}_in_wready),
+    .s_axi_arid     (multichip{i}_in_arid),
+    .s_axi_araddr   (multichip{i}_in_araddr),
+    .s_axi_arlen    (multichip{i}_in_arlen),
+    .s_axi_arsize   (multichip{i}_in_arsize),
+    .s_axi_arvalid  (multichip{i}_in_arvalid),
+    .s_axi_arready  (multichip{i}_in_arready),
+    .s_axi_rid      (multichip{i}_in_rid),
+    .s_axi_rdata    (multichip{i}_in_rdata),
+    .s_axi_rresp    (multichip{i}_in_rresp),
+    .s_axi_rlast    (multichip{i}_in_rlast),
+    .s_axi_rvalid   (multichip{i}_in_rvalid),
+    .s_axi_rready   (multichip{i}_in_rready),
+    .s_axi_bid      (multichip{i}_in_bid),
+    .s_axi_bresp    (multichip{i}_in_bresp),
+    .s_axi_bvalid   (multichip{i}_in_bvalid),
+    .s_axi_bready   (multichip{i}_in_bready),
+    .fpgaid         (fpgaid),
+    {chipid_str}
+);
+
+axi_register_slice multichip_in_flops{i} (
+    .aclk          (shell_clk),
+    .aresetn       (interconnect_rst_n),
+
+    .m_axi_awid   (multichip{i}_in_awid),
+    .m_axi_awaddr (multichip{i}_in_awaddr),
+    .m_axi_awlen  (multichip{i}_in_awlen),
+    .m_axi_awsize (multichip{i}_in_awsize),
+    .m_axi_awvalid(multichip{i}_in_awvalid),
+    .m_axi_awready(multichip{i}_in_awready),
+    .m_axi_wdata  (multichip{i}_in_wdata),
+    .m_axi_wstrb  (multichip{i}_in_wstrb),
+    .m_axi_wlast  (multichip{i}_in_wlast),
+    .m_axi_wvalid (multichip{i}_in_wvalid),
+    .m_axi_wready (multichip{i}_in_wready),
+    .m_axi_arid   (multichip{i}_in_arid),
+    .m_axi_araddr (multichip{i}_in_araddr),
+    .m_axi_arlen  (multichip{i}_in_arlen),
+    .m_axi_arsize (multichip{i}_in_arsize),
+    .m_axi_arvalid(multichip{i}_in_arvalid),
+    .m_axi_arready(multichip{i}_in_arready),
+    .m_axi_rid    (multichip{i}_in_rid),
+    .m_axi_rdata  (multichip{i}_in_rdata),
+    .m_axi_rresp  (multichip{i}_in_rresp),
+    .m_axi_rlast  (multichip{i}_in_rlast),
+    .m_axi_rvalid (multichip{i}_in_rvalid),
+    .m_axi_rready (multichip{i}_in_rready),
+    .m_axi_bid    (multichip{i}_in_bid),
+    .m_axi_bresp  (multichip{i}_in_bresp),
+    .m_axi_bvalid (multichip{i}_in_bvalid),
+    .m_axi_bready (multichip{i}_in_bready),
+
+    .s_axi_awid     (multichip{i}_in_awid_piped),
+    .s_axi_awaddr   (multichip{i}_in_awaddr_piped),
+    .s_axi_awlen    (multichip{i}_in_awlen_piped),
+    .s_axi_awsize   (multichip{i}_in_awsize_piped),
+    .s_axi_awvalid  (multichip{i}_in_awvalid_piped),
+    .s_axi_awready  (multichip{i}_in_awready_piped),
+    .s_axi_wdata    (multichip{i}_in_wdata_piped),
+    .s_axi_wstrb    (multichip{i}_in_wstrb_piped),
+    .s_axi_wlast    (multichip{i}_in_wlast_piped),
+    .s_axi_wvalid   (multichip{i}_in_wvalid_piped),
+    .s_axi_wready   (multichip{i}_in_wready_piped),
+    .s_axi_arid     (multichip{i}_in_arid_piped),
+    .s_axi_araddr   (multichip{i}_in_araddr_piped),
+    .s_axi_arlen    (multichip{i}_in_arlen_piped),
+    .s_axi_arsize   (multichip{i}_in_arsize_piped),
+    .s_axi_arvalid  (multichip{i}_in_arvalid_piped),
+    .s_axi_arready  (multichip{i}_in_arready_piped),
+    .s_axi_rid      (multichip{i}_in_rid_piped),
+    .s_axi_rdata    (multichip{i}_in_rdata_piped),
+    .s_axi_rresp    (multichip{i}_in_rresp_piped),
+    .s_axi_rlast    (multichip{i}_in_rlast_piped),
+    .s_axi_rvalid   (multichip{i}_in_rvalid_piped),
+    .s_axi_rready   (multichip{i}_in_rready_piped),
+    .s_axi_bid      (multichip{i}_in_bid_piped),
+    .s_axi_bresp    (multichip{i}_in_bresp_piped),
+    .s_axi_bvalid   (multichip{i}_in_bvalid_piped),
+    .s_axi_bready   (multichip{i}_in_bready_piped)
+);
+
+
+
+
+system system{i}(
+    // Clocks and resets
+    .sys_clk(piton_clk),
+    .sys_rst_n(piton_rst_n[{i}]),
+
+`ifndef PITONSYS_NO_MC
+`ifdef PITON_FPGA_MC_DDR
+    .ddr_axi_clk(shell_clk),
+    .ddr_axi_resetn(interconnect_rst_n),
+    .ddr_axi_awid(cl_sh_ddr_awid_2d_piped[{i}]),
+    .ddr_axi_awaddr(cl_sh_ddr_awaddr_2d_piped[{i}]),
+    .ddr_axi_awlen(cl_sh_ddr_awlen_2d_piped[{i}]),
+    .ddr_axi_awsize(cl_sh_ddr_awsize_2d_piped[{i}]),
+    .ddr_axi_awburst(cl_sh_ddr_awburst_2d_piped[{i}]),
+    .ddr_axi_awvalid(cl_sh_ddr_awvalid_2d_piped[{i}]),
+    .ddr_axi_awready(sh_cl_ddr_awready_2d_piped[{i}]),
+    .ddr_axi_wid(),
+    .ddr_axi_wdata(cl_sh_ddr_wdata_2d_piped[{i}]),
+    .ddr_axi_wstrb(cl_sh_ddr_wstrb_2d_piped[{i}]),
+    .ddr_axi_wlast(cl_sh_ddr_wlast_2d_piped[{i}]),
+    .ddr_axi_wvalid(cl_sh_ddr_wvalid_2d_piped[{i}]),
+    .ddr_axi_wready(sh_cl_ddr_wready_2d_piped[{i}]),
+    .ddr_axi_arid(cl_sh_ddr_arid_2d_piped[{i}]),
+    .ddr_axi_araddr(cl_sh_ddr_araddr_2d_piped[{i}]),
+    .ddr_axi_arlen(cl_sh_ddr_arlen_2d_piped[{i}]),
+    .ddr_axi_arsize(cl_sh_ddr_arsize_2d_piped[{i}]),
+    .ddr_axi_arburst(cl_sh_ddr_arburst_2d_piped[{i}]),
+    .ddr_axi_arvalid(cl_sh_ddr_arvalid_2d_piped[{i}]),
+    .ddr_axi_arready(sh_cl_ddr_arready_2d_piped[{i}]),
+    .ddr_axi_rid(sh_cl_ddr_rid_2d_piped[{i}]),
+    .ddr_axi_rdata(sh_cl_ddr_rdata_2d_piped[{i}]),
+    .ddr_axi_rresp(sh_cl_ddr_rresp_2d_piped[{i}]),
+    .ddr_axi_rlast(sh_cl_ddr_rlast_2d_piped[{i}]),
+    .ddr_axi_rvalid(sh_cl_ddr_rvalid_2d_piped[{i}]),
+    .ddr_axi_rready(cl_sh_ddr_rready_2d_piped[{i}]),
+    .ddr_axi_bid(sh_cl_ddr_bid_2d_piped[{i}]),
+    .ddr_axi_bresp(sh_cl_ddr_bresp_2d_piped[{i}]),
+    .ddr_axi_bvalid(sh_cl_ddr_bvalid_2d_piped[{i}]),
+    .ddr_axi_bready(cl_sh_ddr_bready_2d_piped[{i}]),
+    .ddr_ready(sh_cl_ddr_is_ready_2d_piped[{i}]),
+
+`endif // PITON_FPGA_MC_DDR
+`endif // PITONSYS_NO_MC
+
+    {chipid_str},
+    .processor_multichip_noc1_valid   (multichip{i}_out_noc1_valid),
+    .processor_multichip_noc1_data    (multichip{i}_out_noc1_data),
+    .processor_multichip_noc1_ready   (multichip{i}_out_noc1_ready),
+    .processor_multichip_noc2_valid   (multichip{i}_out_noc2_valid),
+    .processor_multichip_noc2_data    (multichip{i}_out_noc2_data),
+    .processor_multichip_noc2_ready   (multichip{i}_out_noc2_ready),
+    .processor_multichip_noc3_valid   (multichip{i}_out_noc3_valid),
+    .processor_multichip_noc3_data    (multichip{i}_out_noc3_data),
+    .processor_multichip_noc3_ready   (multichip{i}_out_noc3_ready),
+    .multichip_processor_noc1_valid   (multichip{i}_in_noc1_valid),
+    .multichip_processor_noc1_data    (multichip{i}_in_noc1_data),
+    .multichip_processor_noc1_ready   (multichip{i}_in_noc1_ready),
+    .multichip_processor_noc2_valid   (multichip{i}_in_noc2_valid),
+    .multichip_processor_noc2_data    (multichip{i}_in_noc2_data),
+    .multichip_processor_noc2_ready   (multichip{i}_in_noc2_ready),
+    .multichip_processor_noc3_valid   (multichip{i}_in_noc3_valid),
+    .multichip_processor_noc3_data    (multichip{i}_in_noc3_data),
+    .multichip_processor_noc3_ready   (multichip{i}_in_noc3_ready),
+
+`ifdef PITONSYS_UART
+    .uart_tx(piton_uart_tx[{i}]),
+    .uart_rx(piton_uart_rx[{i}]),
+    `ifdef PITONSYS_UART_CTS
+        .uart_ctsn(piton_uart_ctsn[{i}]),
+        .uart_rtsn(piton_uart_rtsn[{i}]),
+    `endif
+    `ifdef PITONSYS_UART2
+        .uart2_tx(piton_uart2_tx[{i}]),
+        .uart2_rx(piton_uart2_rx[{i}]),
+        `ifdef PITONSYS_UART_CTS
+            .uart2_ctsn(piton_uart2_ctsn[{i}]),
+            .uart2_rtsn(piton_uart2_rtsn[{i}]),
+        `endif
+    `endif
+`endif
+
+    .sw(sw[{i*2+1}:{i*2}]), 
+    .leds(leds[{i*4+3}:{i*4}]) 
+);    
+'''
+)
+%>
+
+
+`ifndef PITONSYS_NO_MC
+`ifdef PITON_FPGA_MC_DDR
+<%
+for i in range(PITON_NUM_CHIPS_PER_FPGA, PITON_NUM_MC_PER_FPGA):
+    print(f'''\
+    assign cl_sh_ddr_awid_2d[{i}] = 0;
+    assign cl_sh_ddr_awaddr_2d[{i}] = 0;
+    assign cl_sh_ddr_awlen_2d[{i}] = 0;
+    assign cl_sh_ddr_awsize_2d[{i}] = 0;
+    assign cl_sh_ddr_awburst_2d[{i}] = 0;
+    assign cl_sh_ddr_awvalid_2d[{i}] = 0;
+    assign cl_sh_ddr_wdata_2d[{i}] = 0;
+    assign cl_sh_ddr_wstrb_2d[{i}] = 0;
+    assign cl_sh_ddr_wlast_2d[{i}] = 0;
+    assign cl_sh_ddr_wvalid_2d[{i}] = 0;
+    assign cl_sh_ddr_arid_2d[{i}] = 0;
+    assign cl_sh_ddr_araddr_2d[{i}] = 0;
+    assign cl_sh_ddr_arlen_2d[{i}] = 0;
+    assign cl_sh_ddr_arsize_2d[{i}] = 0;
+    assign cl_sh_ddr_arburst_2d[{i}] = 0;
+    assign cl_sh_ddr_arvalid_2d[{i}] = 0;
+    assign cl_sh_ddr_rready_2d[{i}] = 1;
+    assign cl_sh_ddr_bready_2d[{i}] = 1;
+'''
+)
+%>
+`endif // PITON_FPGA_MC_DDR
+`endif // PITONSYS_NO_MC
+
+
+<%
+for i in range(PITON_NUM_CHIPS_PER_FPGA, 4):
+    print(f"assign leds[{i*4+3}:{i*4}] = 0;")
+%>
+
+
+///////////////////////////////////////////////////////////////////////
+/////////////////////////// piton /////////////////////////////////////
+///////////////////////////////////////////////////////////////////////
+
+///////////////////////////////////////////////////////////////////////
+/////////////////////////////// axi4 xbar /////////////////////////////
+///////////////////////////////////////////////////////////////////////
+
+<%
+print(f'''\
+
+logic [`AXI4_ID_WIDTH-1:0]    multichip{PITON_NUM_CHIPS_PER_FPGA}_out_awid_piped;
+logic [`AXI4_ADDR_WIDTH-1:0]  multichip{PITON_NUM_CHIPS_PER_FPGA}_out_awaddr_piped;
+logic [`AXI4_LEN_WIDTH-1:0]   multichip{PITON_NUM_CHIPS_PER_FPGA}_out_awlen_piped;
+logic [`AXI4_SIZE_WIDTH-1:0]  multichip{PITON_NUM_CHIPS_PER_FPGA}_out_awsize_piped;
+logic                         multichip{PITON_NUM_CHIPS_PER_FPGA}_out_awvalid_piped;
+logic                         multichip{PITON_NUM_CHIPS_PER_FPGA}_out_awready_piped;
+logic [`AXI4_DATA_WIDTH-1:0]  multichip{PITON_NUM_CHIPS_PER_FPGA}_out_wdata_piped;
+logic [`AXI4_STRB_WIDTH-1:0]  multichip{PITON_NUM_CHIPS_PER_FPGA}_out_wstrb_piped;
+logic                         multichip{PITON_NUM_CHIPS_PER_FPGA}_out_wlast_piped;
+logic                         multichip{PITON_NUM_CHIPS_PER_FPGA}_out_wvalid_piped;
+logic                         multichip{PITON_NUM_CHIPS_PER_FPGA}_out_wready_piped;
+logic [`AXI4_ID_WIDTH-1:0]    multichip{PITON_NUM_CHIPS_PER_FPGA}_out_bid_piped;
+logic [`AXI4_RESP_WIDTH-1:0]  multichip{PITON_NUM_CHIPS_PER_FPGA}_out_bresp_piped;
+logic                         multichip{PITON_NUM_CHIPS_PER_FPGA}_out_bvalid_piped;
+logic                         multichip{PITON_NUM_CHIPS_PER_FPGA}_out_bready_piped;
+logic [`AXI4_ID_WIDTH-1:0]    multichip{PITON_NUM_CHIPS_PER_FPGA}_out_arid_piped;
+logic [`AXI4_ADDR_WIDTH-1:0]  multichip{PITON_NUM_CHIPS_PER_FPGA}_out_araddr_piped;
+logic [`AXI4_LEN_WIDTH-1:0]   multichip{PITON_NUM_CHIPS_PER_FPGA}_out_arlen_piped;
+logic [`AXI4_SIZE_WIDTH-1:0]  multichip{PITON_NUM_CHIPS_PER_FPGA}_out_arsize_piped;
+logic                         multichip{PITON_NUM_CHIPS_PER_FPGA}_out_arvalid_piped;
+logic                         multichip{PITON_NUM_CHIPS_PER_FPGA}_out_arready_piped;
+logic [`AXI4_ID_WIDTH-1:0]    multichip{PITON_NUM_CHIPS_PER_FPGA}_out_rid_piped;
+logic [`AXI4_DATA_WIDTH-1:0]  multichip{PITON_NUM_CHIPS_PER_FPGA}_out_rdata_piped;
+logic [`AXI4_RESP_WIDTH-1:0]  multichip{PITON_NUM_CHIPS_PER_FPGA}_out_rresp_piped;
+logic                         multichip{PITON_NUM_CHIPS_PER_FPGA}_out_rlast_piped;
+logic                         multichip{PITON_NUM_CHIPS_PER_FPGA}_out_rvalid_piped;
+logic                         multichip{PITON_NUM_CHIPS_PER_FPGA}_out_rready_piped;
+
+
+axi_register_slice multichip_out_flops{PITON_NUM_CHIPS_PER_FPGA} (
+    .aclk          (shell_clk),
+    .aresetn       (interconnect_rst_n),
+   
+    .s_axi_awid     (sh_cl_dma_pcis_awid),
+    .s_axi_awaddr   (sh_cl_dma_pcis_awaddr),
+    .s_axi_awlen    (sh_cl_dma_pcis_awlen),
+    .s_axi_awsize   (sh_cl_dma_pcis_awsize),
+    .s_axi_awvalid  (sh_cl_dma_pcis_awvalid),
+    .s_axi_awready  (cl_sh_dma_pcis_awready),
+    .s_axi_wdata    (sh_cl_dma_pcis_wdata),
+    .s_axi_wstrb    (sh_cl_dma_pcis_wstrb),
+    .s_axi_wlast    (sh_cl_dma_pcis_wlast),
+    .s_axi_wvalid   (sh_cl_dma_pcis_wvalid),
+    .s_axi_wready   (cl_sh_dma_pcis_wready),
+    .s_axi_arid     (sh_cl_dma_pcis_arid),
+    .s_axi_araddr   (sh_cl_dma_pcis_araddr),
+    .s_axi_arlen    (sh_cl_dma_pcis_arlen),
+    .s_axi_arsize   (sh_cl_dma_pcis_arsize),
+    .s_axi_arvalid  (sh_cl_dma_pcis_arvalid),
+    .s_axi_arready  (cl_sh_dma_pcis_arready),
+    .s_axi_rid      (cl_sh_dma_pcis_rid),
+    .s_axi_rdata    (cl_sh_dma_pcis_rdata),
+    .s_axi_rresp    (cl_sh_dma_pcis_rresp),
+    .s_axi_rlast    (cl_sh_dma_pcis_rlast),
+    .s_axi_rvalid   (cl_sh_dma_pcis_rvalid),
+    .s_axi_rready   (sh_cl_dma_pcis_rready),
+    .s_axi_bid      (cl_sh_dma_pcis_bid),
+    .s_axi_bresp    (cl_sh_dma_pcis_bresp),
+    .s_axi_bvalid   (cl_sh_dma_pcis_bvalid),
+    .s_axi_bready   (sh_cl_dma_pcis_bready),
+
+    .m_axi_awid     (multichip{PITON_NUM_CHIPS_PER_FPGA}_out_awid_piped),
+    .m_axi_awaddr   (multichip{PITON_NUM_CHIPS_PER_FPGA}_out_awaddr_piped),
+    .m_axi_awlen    (multichip{PITON_NUM_CHIPS_PER_FPGA}_out_awlen_piped),
+    .m_axi_awsize   (multichip{PITON_NUM_CHIPS_PER_FPGA}_out_awsize_piped),
+    .m_axi_awvalid  (multichip{PITON_NUM_CHIPS_PER_FPGA}_out_awvalid_piped),
+    .m_axi_awready  (multichip{PITON_NUM_CHIPS_PER_FPGA}_out_awready_piped),
+    .m_axi_wdata    (multichip{PITON_NUM_CHIPS_PER_FPGA}_out_wdata_piped),
+    .m_axi_wstrb    (multichip{PITON_NUM_CHIPS_PER_FPGA}_out_wstrb_piped),
+    .m_axi_wlast    (multichip{PITON_NUM_CHIPS_PER_FPGA}_out_wlast_piped),
+    .m_axi_wvalid   (multichip{PITON_NUM_CHIPS_PER_FPGA}_out_wvalid_piped),
+    .m_axi_wready   (multichip{PITON_NUM_CHIPS_PER_FPGA}_out_wready_piped),
+    .m_axi_arid     (multichip{PITON_NUM_CHIPS_PER_FPGA}_out_arid_piped),
+    .m_axi_araddr   (multichip{PITON_NUM_CHIPS_PER_FPGA}_out_araddr_piped),
+    .m_axi_arlen    (multichip{PITON_NUM_CHIPS_PER_FPGA}_out_arlen_piped),
+    .m_axi_arsize   (multichip{PITON_NUM_CHIPS_PER_FPGA}_out_arsize_piped),
+    .m_axi_arvalid  (multichip{PITON_NUM_CHIPS_PER_FPGA}_out_arvalid_piped),
+    .m_axi_arready  (multichip{PITON_NUM_CHIPS_PER_FPGA}_out_arready_piped),
+    .m_axi_rid      (multichip{PITON_NUM_CHIPS_PER_FPGA}_out_rid_piped),
+    .m_axi_rdata    (multichip{PITON_NUM_CHIPS_PER_FPGA}_out_rdata_piped),
+    .m_axi_rresp    (multichip{PITON_NUM_CHIPS_PER_FPGA}_out_rresp_piped),
+    .m_axi_rlast    (multichip{PITON_NUM_CHIPS_PER_FPGA}_out_rlast_piped),
+    .m_axi_rvalid   (multichip{PITON_NUM_CHIPS_PER_FPGA}_out_rvalid_piped),
+    .m_axi_rready   (multichip{PITON_NUM_CHIPS_PER_FPGA}_out_rready_piped),
+    .m_axi_bid      (multichip{PITON_NUM_CHIPS_PER_FPGA}_out_bid_piped),
+    .m_axi_bresp    (multichip{PITON_NUM_CHIPS_PER_FPGA}_out_bresp_piped),
+    .m_axi_bvalid   (multichip{PITON_NUM_CHIPS_PER_FPGA}_out_bvalid_piped),
+    .m_axi_bready   (multichip{PITON_NUM_CHIPS_PER_FPGA}_out_bready_piped)
+);
+
+logic [`AXI4_ID_WIDTH-1:0]    multichip{PITON_NUM_CHIPS_PER_FPGA}_in_awid_piped;
+logic [`AXI4_ADDR_WIDTH-1:0]  multichip{PITON_NUM_CHIPS_PER_FPGA}_in_awaddr_piped;
+logic [`AXI4_LEN_WIDTH-1:0]   multichip{PITON_NUM_CHIPS_PER_FPGA}_in_awlen_piped;
+logic [`AXI4_SIZE_WIDTH-1:0]  multichip{PITON_NUM_CHIPS_PER_FPGA}_in_awsize_piped;
+logic                         multichip{PITON_NUM_CHIPS_PER_FPGA}_in_awvalid_piped;
+logic                         multichip{PITON_NUM_CHIPS_PER_FPGA}_in_awready_piped;
+logic [`AXI4_DATA_WIDTH-1:0]  multichip{PITON_NUM_CHIPS_PER_FPGA}_in_wdata_piped;
+logic [`AXI4_STRB_WIDTH-1:0]  multichip{PITON_NUM_CHIPS_PER_FPGA}_in_wstrb_piped;
+logic                         multichip{PITON_NUM_CHIPS_PER_FPGA}_in_wlast_piped;
+logic                         multichip{PITON_NUM_CHIPS_PER_FPGA}_in_wvalid_piped;
+logic                         multichip{PITON_NUM_CHIPS_PER_FPGA}_in_wready_piped;
+logic [`AXI4_ID_WIDTH-1:0]    multichip{PITON_NUM_CHIPS_PER_FPGA}_in_bid_piped;
+logic [`AXI4_RESP_WIDTH-1:0]  multichip{PITON_NUM_CHIPS_PER_FPGA}_in_bresp_piped;
+logic                         multichip{PITON_NUM_CHIPS_PER_FPGA}_in_bvalid_piped;
+logic                         multichip{PITON_NUM_CHIPS_PER_FPGA}_in_bready_piped;
+logic [`AXI4_ID_WIDTH-1:0]    multichip{PITON_NUM_CHIPS_PER_FPGA}_in_arid_piped;
+logic [`AXI4_ADDR_WIDTH-1:0]  multichip{PITON_NUM_CHIPS_PER_FPGA}_in_araddr_piped;
+logic [`AXI4_LEN_WIDTH-1:0]   multichip{PITON_NUM_CHIPS_PER_FPGA}_in_arlen_piped;
+logic [`AXI4_SIZE_WIDTH-1:0]  multichip{PITON_NUM_CHIPS_PER_FPGA}_in_arsize_piped;
+logic                         multichip{PITON_NUM_CHIPS_PER_FPGA}_in_arvalid_piped;
+logic                         multichip{PITON_NUM_CHIPS_PER_FPGA}_in_arready_piped;
+logic [`AXI4_ID_WIDTH-1:0]    multichip{PITON_NUM_CHIPS_PER_FPGA}_in_rid_piped;
+logic [`AXI4_DATA_WIDTH-1:0]  multichip{PITON_NUM_CHIPS_PER_FPGA}_in_rdata_piped;
+logic [`AXI4_RESP_WIDTH-1:0]  multichip{PITON_NUM_CHIPS_PER_FPGA}_in_rresp_piped;
+logic                         multichip{PITON_NUM_CHIPS_PER_FPGA}_in_rlast_piped;
+logic                         multichip{PITON_NUM_CHIPS_PER_FPGA}_in_rvalid_piped;
+logic                         multichip{PITON_NUM_CHIPS_PER_FPGA}_in_rready_piped;
+
+
+axi_register_slice multichip_in_flops{PITON_NUM_CHIPS_PER_FPGA} (
+    .aclk          (shell_clk),
+    .aresetn       (interconnect_rst_n),
+
+    .m_axi_awid     (cl_sh_pcim_awid), 
+    .m_axi_awaddr   (cl_sh_pcim_awaddr), 
+    .m_axi_awlen    (cl_sh_pcim_awlen), 
+    .m_axi_awsize   (cl_sh_pcim_awsize), 
+    .m_axi_awvalid  (cl_sh_pcim_awvalid), 
+    .m_axi_awready  (sh_cl_pcim_awready), 
+    .m_axi_wdata    (cl_sh_pcim_wdata), 
+    .m_axi_wstrb    (cl_sh_pcim_wstrb), 
+    .m_axi_wlast    (cl_sh_pcim_wlast), 
+    .m_axi_wvalid   (cl_sh_pcim_wvalid), 
+    .m_axi_wready   (sh_cl_pcim_wready), 
+    .m_axi_arid     (cl_sh_pcim_arid), 
+    .m_axi_araddr   (cl_sh_pcim_araddr), 
+    .m_axi_arlen    (cl_sh_pcim_arlen), 
+    .m_axi_arsize   (cl_sh_pcim_arsize), 
+    .m_axi_arvalid  (cl_sh_pcim_arvalid), 
+    .m_axi_arready  (sh_cl_pcim_arready), 
+    .m_axi_rid      (sh_cl_pcim_rid), 
+    .m_axi_rdata    (sh_cl_pcim_rdata), 
+    .m_axi_rresp    (sh_cl_pcim_rresp), 
+    .m_axi_rlast    (sh_cl_pcim_rlast), 
+    .m_axi_rvalid   (sh_cl_pcim_rvalid), 
+    .m_axi_rready   (cl_sh_pcim_rready), 
+    .m_axi_bid      (sh_cl_pcim_bid), 
+    .m_axi_bresp    (sh_cl_pcim_bresp), 
+    .m_axi_bvalid   (sh_cl_pcim_bvalid), 
+    .m_axi_bready   (cl_sh_pcim_bready),
+
+    .s_axi_awid     (multichip{PITON_NUM_CHIPS_PER_FPGA}_in_awid_piped),
+    .s_axi_awaddr   (multichip{PITON_NUM_CHIPS_PER_FPGA}_in_awaddr_piped),
+    .s_axi_awlen    (multichip{PITON_NUM_CHIPS_PER_FPGA}_in_awlen_piped),
+    .s_axi_awsize   (multichip{PITON_NUM_CHIPS_PER_FPGA}_in_awsize_piped),
+    .s_axi_awvalid  (multichip{PITON_NUM_CHIPS_PER_FPGA}_in_awvalid_piped),
+    .s_axi_awready  (multichip{PITON_NUM_CHIPS_PER_FPGA}_in_awready_piped),
+    .s_axi_wdata    (multichip{PITON_NUM_CHIPS_PER_FPGA}_in_wdata_piped),
+    .s_axi_wstrb    (multichip{PITON_NUM_CHIPS_PER_FPGA}_in_wstrb_piped),
+    .s_axi_wlast    (multichip{PITON_NUM_CHIPS_PER_FPGA}_in_wlast_piped),
+    .s_axi_wvalid   (multichip{PITON_NUM_CHIPS_PER_FPGA}_in_wvalid_piped),
+    .s_axi_wready   (multichip{PITON_NUM_CHIPS_PER_FPGA}_in_wready_piped),
+    .s_axi_arid     (multichip{PITON_NUM_CHIPS_PER_FPGA}_in_arid_piped),
+    .s_axi_araddr   (multichip{PITON_NUM_CHIPS_PER_FPGA}_in_araddr_piped),
+    .s_axi_arlen    (multichip{PITON_NUM_CHIPS_PER_FPGA}_in_arlen_piped),
+    .s_axi_arsize   (multichip{PITON_NUM_CHIPS_PER_FPGA}_in_arsize_piped),
+    .s_axi_arvalid  (multichip{PITON_NUM_CHIPS_PER_FPGA}_in_arvalid_piped),
+    .s_axi_arready  (multichip{PITON_NUM_CHIPS_PER_FPGA}_in_arready_piped),
+    .s_axi_rid      (multichip{PITON_NUM_CHIPS_PER_FPGA}_in_rid_piped),
+    .s_axi_rdata    (multichip{PITON_NUM_CHIPS_PER_FPGA}_in_rdata_piped),
+    .s_axi_rresp    (multichip{PITON_NUM_CHIPS_PER_FPGA}_in_rresp_piped),
+    .s_axi_rlast    (multichip{PITON_NUM_CHIPS_PER_FPGA}_in_rlast_piped),
+    .s_axi_rvalid   (multichip{PITON_NUM_CHIPS_PER_FPGA}_in_rvalid_piped),
+    .s_axi_rready   (multichip{PITON_NUM_CHIPS_PER_FPGA}_in_rready_piped),
+    .s_axi_bid      (multichip{PITON_NUM_CHIPS_PER_FPGA}_in_bid_piped),
+    .s_axi_bresp    (multichip{PITON_NUM_CHIPS_PER_FPGA}_in_bresp_piped),
+    .s_axi_bvalid   (multichip{PITON_NUM_CHIPS_PER_FPGA}_in_bvalid_piped),
+    .s_axi_bready   (multichip{PITON_NUM_CHIPS_PER_FPGA}_in_bready_piped)
+);
+
+// ila_1 multichip{PITON_NUM_CHIPS_PER_FPGA}_out_ila (
+//     .clk(shell_clk),
+//     .probe0(multichip{PITON_NUM_CHIPS_PER_FPGA}_out_wready_piped),
+//     .probe1( multichip{PITON_NUM_CHIPS_PER_FPGA}_out_awaddr_piped),
+//     .probe2( multichip{PITON_NUM_CHIPS_PER_FPGA}_out_bresp_piped),
+//     .probe3( multichip{PITON_NUM_CHIPS_PER_FPGA}_out_bvalid_piped),
+//     .probe4( multichip{PITON_NUM_CHIPS_PER_FPGA}_out_bready_piped),
+//     .probe5( multichip{PITON_NUM_CHIPS_PER_FPGA}_out_araddr_piped),
+//     .probe6( multichip{PITON_NUM_CHIPS_PER_FPGA}_out_rready_piped),
+//     .probe7( multichip{PITON_NUM_CHIPS_PER_FPGA}_out_wvalid_piped),
+//     .probe8( multichip{PITON_NUM_CHIPS_PER_FPGA}_out_arvalid_piped),
+//     .probe9( multichip{PITON_NUM_CHIPS_PER_FPGA}_out_arready_piped),
+//     .probe10( multichip{PITON_NUM_CHIPS_PER_FPGA}_out_rdata_piped),
+//     .probe11( multichip{PITON_NUM_CHIPS_PER_FPGA}_out_awvalid_piped),
+//     .probe12( multichip{PITON_NUM_CHIPS_PER_FPGA}_out_awready_piped),
+//     .probe13( multichip{PITON_NUM_CHIPS_PER_FPGA}_out_rresp_piped),
+//     .probe14( multichip{PITON_NUM_CHIPS_PER_FPGA}_out_wdata_piped),
+//     .probe15( multichip{PITON_NUM_CHIPS_PER_FPGA}_out_wstrb_piped),
+//     .probe16( multichip{PITON_NUM_CHIPS_PER_FPGA}_out_rvalid_piped),
+//     .probe19( multichip{PITON_NUM_CHIPS_PER_FPGA}_out_awid_piped),
+//     .probe20( multichip{PITON_NUM_CHIPS_PER_FPGA}_out_bid_piped),
+//     .probe25( multichip{PITON_NUM_CHIPS_PER_FPGA}_out_arid_piped),
+//     .probe38( multichip{PITON_NUM_CHIPS_PER_FPGA}_out_rid_piped),
+//     .probe41( multichip{PITON_NUM_CHIPS_PER_FPGA}_out_rlast_piped),
+//     .probe43( multichip{PITON_NUM_CHIPS_PER_FPGA}_out_wlast_piped)
+// );
+
+// ila_1 multichip{PITON_NUM_CHIPS_PER_FPGA}_in_ila (
+//     .clk(shell_clk),
+//     .probe0(multichip{PITON_NUM_CHIPS_PER_FPGA}_in_wready_piped),
+//     .probe1( multichip{PITON_NUM_CHIPS_PER_FPGA}_in_awaddr_piped),
+//     .probe2( multichip{PITON_NUM_CHIPS_PER_FPGA}_in_bresp_piped),
+//     .probe3( multichip{PITON_NUM_CHIPS_PER_FPGA}_in_bvalid_piped),
+//     .probe4( multichip{PITON_NUM_CHIPS_PER_FPGA}_in_bready_piped),
+//     .probe5( multichip{PITON_NUM_CHIPS_PER_FPGA}_in_araddr_piped),
+//     .probe6( multichip{PITON_NUM_CHIPS_PER_FPGA}_in_rready_piped),
+//     .probe7( multichip{PITON_NUM_CHIPS_PER_FPGA}_in_wvalid_piped),
+//     .probe8( multichip{PITON_NUM_CHIPS_PER_FPGA}_in_arvalid_piped),
+//     .probe9( multichip{PITON_NUM_CHIPS_PER_FPGA}_in_arready_piped),
+//     .probe10( multichip{PITON_NUM_CHIPS_PER_FPGA}_in_rdata_piped),
+//     .probe11( multichip{PITON_NUM_CHIPS_PER_FPGA}_in_awvalid_piped),
+//     .probe12( multichip{PITON_NUM_CHIPS_PER_FPGA}_in_awready_piped),
+//     .probe13( multichip{PITON_NUM_CHIPS_PER_FPGA}_in_rresp_piped),
+//     .probe14( multichip{PITON_NUM_CHIPS_PER_FPGA}_in_wdata_piped),
+//     .probe15( multichip{PITON_NUM_CHIPS_PER_FPGA}_in_wstrb_piped),
+//     .probe16( multichip{PITON_NUM_CHIPS_PER_FPGA}_in_rvalid_piped),
+//     .probe19( multichip{PITON_NUM_CHIPS_PER_FPGA}_in_awid_piped),
+//     .probe20( multichip{PITON_NUM_CHIPS_PER_FPGA}_in_bid_piped),
+//     .probe25( multichip{PITON_NUM_CHIPS_PER_FPGA}_in_arid_piped),
+//     .probe38( multichip{PITON_NUM_CHIPS_PER_FPGA}_in_rid_piped),
+//     .probe41( multichip{PITON_NUM_CHIPS_PER_FPGA}_in_rlast_piped),
+//     .probe43( multichip{PITON_NUM_CHIPS_PER_FPGA}_in_wlast_piped)
+// );  
+
+''')
+%>
+
+
+
+
+aws_xbar aws_xbar (
+<%
+for i in range(PITON_NUM_CHIPS_PER_FPGA+1):
+    print(f'''\
+    .s{i}_axi_awid(multichip{i}_out_awid_piped),
+    .s{i}_axi_awaddr(multichip{i}_out_awaddr_piped),
+    .s{i}_axi_awlen(multichip{i}_out_awlen_piped),
+    .s{i}_axi_awsize(multichip{i}_out_awsize_piped),
+    .s{i}_axi_awburst(multichip{i}_out_awburst_piped),
+    .s{i}_axi_awlock(multichip{i}_out_awlock_piped),
+    .s{i}_axi_awcache(multichip{i}_out_awcache_piped),
+    .s{i}_axi_awprot(multichip{i}_out_awprot_piped),
+    .s{i}_axi_awqos(multichip{i}_out_awqos_piped),
+    .s{i}_axi_awuser(multichip{i}_out_awuser_piped),
+    .s{i}_axi_awvalid(multichip{i}_out_awvalid_piped),
+    .s{i}_axi_awready(multichip{i}_out_awready_piped),
+    .s{i}_axi_wdata(multichip{i}_out_wdata_piped),
+    .s{i}_axi_wstrb(multichip{i}_out_wstrb_piped),
+    .s{i}_axi_wlast(multichip{i}_out_wlast_piped),
+    .s{i}_axi_wuser(multichip{i}_out_wuser_piped),
+    .s{i}_axi_wvalid(multichip{i}_out_wvalid_piped),
+    .s{i}_axi_wready(multichip{i}_out_wready_piped),
+    .s{i}_axi_bid(multichip{i}_out_bid_piped),
+    .s{i}_axi_bresp(multichip{i}_out_bresp_piped),
+    .s{i}_axi_buser(multichip{i}_out_buser_piped),
+    .s{i}_axi_bvalid(multichip{i}_out_bvalid_piped),
+    .s{i}_axi_bready(multichip{i}_out_bready_piped),
+    .s{i}_axi_arid(multichip{i}_out_arid_piped),
+    .s{i}_axi_araddr(multichip{i}_out_araddr_piped),
+    .s{i}_axi_arlen(multichip{i}_out_arlen_piped),
+    .s{i}_axi_arsize(multichip{i}_out_arsize_piped),
+    .s{i}_axi_arburst(multichip{i}_out_arburst_piped),
+    .s{i}_axi_arlock(multichip{i}_out_arlock_piped),
+    .s{i}_axi_arcache(multichip{i}_out_arcache_piped),
+    .s{i}_axi_arprot(multichip{i}_out_arprot_piped),
+    .s{i}_axi_arqos(multichip{i}_out_arqos_piped),
+    .s{i}_axi_aruser(multichip{i}_out_aruser_piped),
+    .s{i}_axi_arvalid(multichip{i}_out_arvalid_piped),
+    .s{i}_axi_arready(multichip{i}_out_arready_piped),
+    .s{i}_axi_rid(multichip{i}_out_rid_piped),
+    .s{i}_axi_rdata(multichip{i}_out_rdata_piped),
+    .s{i}_axi_rresp(multichip{i}_out_rresp_piped),
+    .s{i}_axi_rlast(multichip{i}_out_rlast_piped),
+    .s{i}_axi_ruser(multichip{i}_out_ruser_piped),
+    .s{i}_axi_rvalid(multichip{i}_out_rvalid_piped),
+    .s{i}_axi_rready(multichip{i}_out_rready_piped),
+
+    .m{i}_axi_awid(multichip{i}_in_awid_piped),
+    .m{i}_axi_awaddr(multichip{i}_in_awaddr_piped),
+    .m{i}_axi_awlen(multichip{i}_in_awlen_piped),
+    .m{i}_axi_awsize(multichip{i}_in_awsize_piped),
+    .m{i}_axi_awburst(multichip{i}_in_awburst_piped),
+    .m{i}_axi_awlock(multichip{i}_in_awlock_piped),
+    .m{i}_axi_awcache(multichip{i}_in_awcache_piped),
+    .m{i}_axi_awprot(multichip{i}_in_awprot_piped),
+    .m{i}_axi_awregion(multichip{i}_in_awregion_piped),
+    .m{i}_axi_awqos(multichip{i}_in_awqos_piped),
+    .m{i}_axi_awuser(multichip{i}_in_awuser_piped),
+    .m{i}_axi_awvalid(multichip{i}_in_awvalid_piped),
+    .m{i}_axi_awready(multichip{i}_in_awready_piped),
+    .m{i}_axi_wdata(multichip{i}_in_wdata_piped),
+    .m{i}_axi_wstrb(multichip{i}_in_wstrb_piped),
+    .m{i}_axi_wlast(multichip{i}_in_wlast_piped),
+    .m{i}_axi_wuser(multichip{i}_in_wuser_piped),
+    .m{i}_axi_wvalid(multichip{i}_in_wvalid_piped),
+    .m{i}_axi_wready(multichip{i}_in_wready_piped),
+    .m{i}_axi_bid(multichip{i}_in_bid_piped),
+    .m{i}_axi_bresp(multichip{i}_in_bresp_piped),
+    .m{i}_axi_buser(multichip{i}_in_buser_piped),
+    .m{i}_axi_bvalid(multichip{i}_in_bvalid_piped),
+    .m{i}_axi_bready(multichip{i}_in_bready_piped),
+    .m{i}_axi_arid(multichip{i}_in_arid_piped),
+    .m{i}_axi_araddr(multichip{i}_in_araddr_piped),
+    .m{i}_axi_arlen(multichip{i}_in_arlen_piped),
+    .m{i}_axi_arsize(multichip{i}_in_arsize_piped),
+    .m{i}_axi_arburst(multichip{i}_in_arburst_piped),
+    .m{i}_axi_arlock(multichip{i}_in_arlock_piped),
+    .m{i}_axi_arcache(multichip{i}_in_arcache_piped),
+    .m{i}_axi_arprot(multichip{i}_in_arprot_piped),
+    .m{i}_axi_arregion(multichip{i}_in_arregion_piped),
+    .m{i}_axi_arqos(multichip{i}_in_arqos_piped),
+    .m{i}_axi_aruser(multichip{i}_in_aruser_piped),
+    .m{i}_axi_arvalid(multichip{i}_in_arvalid_piped),
+    .m{i}_axi_arready(multichip{i}_in_arready_piped),
+    .m{i}_axi_rid(multichip{i}_in_rid_piped),
+    .m{i}_axi_rdata(multichip{i}_in_rdata_piped),
+    .m{i}_axi_rresp(multichip{i}_in_rresp_piped),
+    .m{i}_axi_rlast(multichip{i}_in_rlast_piped),
+    .m{i}_axi_ruser(multichip{i}_in_ruser_piped),
+    .m{i}_axi_rvalid(multichip{i}_in_rvalid_piped),
+    .m{i}_axi_rready(multichip{i}_in_rready_piped),
+''')
+%>
+    .clk(shell_clk), 
+    .rst_n(interconnect_rst_n)
+);
+
+
+///////////////////////////////////////////////////////////////////////
+/////////////////////////////// axi4 xbar /////////////////////////////
+///////////////////////////////////////////////////////////////////////
+
+
+
+///////////////////////////////////////////////////////////////////////
+///////////////// aws uart module /////////////////////////////////////
+///////////////////////////////////////////////////////////////////////
+
+`ifdef PITONSYS_UART
+    aws_uart aws_uart (
+        .shell_clk     (shell_clk), 
+        .shell_rst_n   (interconnect_rst_n), 
+
+        .piton_uart_rx (piton_uart_rx), 
+        .piton_uart_tx (piton_uart_tx), 
+        `ifdef PITONSYS_UART_CTS
+        .piton_uart_ctsn(piton_uart_ctsn),
+        .piton_uart_rtsn(piton_uart_rtsn),
+        `endif
+        
+        .awaddr_in     (sh_ocl_awaddr    ),
+        .awvalid_in    (sh_ocl_awvalid   ),
+        .awready_in    (ocl_sh_awready   ),
+        .wdata_in      (sh_ocl_wdata     ),
+        .wstrb_in      (sh_ocl_wstrb     ),
+        .wvalid_in     (sh_ocl_wvalid    ),
+        .wready_in     (ocl_sh_wready    ),
+        .bresp_in      (ocl_sh_bresp     ),
+        .bvalid_in     (ocl_sh_bvalid    ),
+        .bready_in     (sh_ocl_bready    ),
+        .araddr_in     (sh_ocl_araddr    ),
+        .arvalid_in    (sh_ocl_arvalid   ),
+        .arready_in    (ocl_sh_arready   ),
+        .rdata_in      (ocl_sh_rdata     ),
+        .rresp_in      (ocl_sh_rresp     ),
+        .rvalid_in     (ocl_sh_rvalid    ),
+        .rready_in     (sh_ocl_rready    )
+    );
+`endif
+
+`ifdef PITONSYS_UART2
+    aws_uart aws_uart2 (
+        .shell_clk     (shell_clk), 
+        .shell_rst_n   (interconnect_rst_n), 
+
+        .piton_uart_rx (piton_uart2_rx), 
+        .piton_uart_tx (piton_uart2_tx), 
+        `ifdef PITONSYS_UART_CTS
+        .piton_uart_ctsn(piton_uart2_ctsn),
+        .piton_uart_rtsn(piton_uart2_rtsn),
+        `endif
+        
+        .awaddr_in     (sh_bar1_awaddr    ),
+        .awvalid_in    (sh_bar1_awvalid   ),
+        .awready_in    (bar1_sh_awready   ),
+        .wdata_in      (sh_bar1_wdata     ),
+        .wstrb_in      (sh_bar1_wstrb     ),
+        .wvalid_in     (sh_bar1_wvalid    ),
+        .wready_in     (bar1_sh_wready    ),
+        .bresp_in      (bar1_sh_bresp     ),
+        .bvalid_in     (bar1_sh_bvalid    ),
+        .bready_in     (sh_bar1_bready    ),
+        .araddr_in     (sh_bar1_araddr    ),
+        .arvalid_in    (sh_bar1_arvalid   ),
+        .arready_in    (bar1_sh_arready   ),
+        .rdata_in      (bar1_sh_rdata     ),
+        .rresp_in      (bar1_sh_rresp     ),
+        .rvalid_in     (bar1_sh_rvalid    ),
+        .rready_in     (sh_bar1_rready    )
+    );
+`endif
+
+///////////////////////////////////////////////////////////////////////
+///////////////// aws uart module /////////////////////////////////////
+///////////////////////////////////////////////////////////////////////
+
+
+
+endmodule // aws_shell

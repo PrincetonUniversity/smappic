@@ -1,0 +1,325 @@
+# Copyright 2018 ETH Zurich and University of Bologna.
+# Copyright and related rights are licensed under the Solderpad Hardware
+# License, Version 0.51 (the "License"); you may not use this file except in
+# compliance with the License.  You may obtain a copy of the License at
+# http://solderpad.org/licenses/SHL-0.51. Unless required by applicable law
+# or agreed to in writing, software, hardware and materials distributed under
+# this License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+# CONDITIONS OF ANY KIND, either express or implied. See the License for the
+# specific language governing permissions and limitations under the License.
+#
+# Author: Michael Schaffner <schaffner@iis.ee.ethz.ch>, ETH Zurich
+# Date: 26.11.2018
+# Description: GitLab CI configuration script.
+
+before_script:
+  - git submodule update --init --recursive
+  - export PITON_ROOT=`pwd`
+  # paths to local or network installations (the riscv toolchain is not built in the ci job as in travis)
+  # (license setup is then done by the SEPP startup script)
+  - eval "function vcs() { command vcs-2017.03-kgf vcs -full64 \"\$@\"; };"
+  - export -f vcs
+  - export VCS_HOME="/usr/pack/vcs-2017.03-kgf/"
+  - export MODELSIM_VERSION="-10.6b -64"
+  - export MODELSIM_HOME="/usr/pack/modelsim-10.6b-kgf/"
+  - export VIVADO_BIN="vivado-2018.1 vivado"
+  - export CXX=g++-7.2.0 CC=gcc-7.2.0
+  - export RISCV=/scratch2/gitlabci/riscv_install
+  - export VERILATOR_ROOT=/scratch2/gitlabci/verilator-4.014
+  # setup dependent paths
+  - export PATH=$PATH:${RISCV}/bin:$VERILATOR_ROOT/bin
+  - export LIBRARY_PATH=$RISCV/lib
+  - export LD_LIBRARY_PATH=$RISCV/lib:/usr/pack/gcc-7.2.0-af/linux-x64/lib64/
+  - export C_INCLUDE_PATH=$RISCV/include:$VERILATOR_ROOT/include:/usr/pack/gcc-7.2.0-af/linux-x64/include
+  - export CPLUS_INCLUDE_PATH=$RISCV/include:$VERILATOR_ROOT/include:/usr/pack/gcc-7.2.0-af/linux-x64/include
+  - export ARIANE_ROOT=${PITON_ROOT}/piton/design/chip/tile/ariane/
+  # this is for sims batches
+  - export DRMJOBSCRATCHSPACE=/scratch2/gitlabci/tmp/
+  # piton setup
+  - "source piton/piton_settings.bash"
+
+variables:
+  GIT_SUBMODULE_STRATEGY: recursive
+
+stages:
+  - tools
+  - build
+  - sparc
+  - ariane
+
+###################################
+# setup tools
+
+build-tools:
+  stage: tools
+  script:
+    - source piton/ariane_build_tools.sh
+  artifacts:
+    paths:
+      - ./piton/design/chip/tile/ariane/tmp/
+
+###################################
+# try to build different configs with VCS
+
+vcs-pico:
+  stage: build
+  script:
+    - cd build
+    - sims -sys=manycore -vcs_build -x_tiles=1 -y_tiles=1 -pico
+
+vcs-sparc:
+  stage: build
+  script:
+    - cd build
+    - sims -sys=manycore -vcs_build -x_tiles=1 -y_tiles=1
+
+vcs-ariane:
+  stage: build
+  script:
+    - cd build
+    - sims -sys=manycore -vcs_build -x_tiles=1 -y_tiles=1 -ariane
+
+msm-pico:
+  stage: build
+  script:
+    - cd build
+    - sims -sys=manycore -msm_build -x_tiles=1 -y_tiles=1 -pico
+    - "grep 'Errors: 0' sims.log"
+
+msm-ariane:
+  stage: build
+  script:
+    - cd build
+    - sims -sys=manycore -msm_build -x_tiles=1 -y_tiles=1 -ariane
+    - "grep 'Errors: 0' sims.log"
+
+msm-sparc:
+  stage: build
+  script:
+    - cd build
+    - sims -sys=manycore -msm_build -x_tiles=1 -y_tiles=1
+    - "grep 'Errors: 0' sims.log"
+
+vlt-pico:
+  stage: build
+  script:
+    - cd build
+    - sims -sys=manycore -vlt_build -x_tiles=1 -y_tiles=1 -pico
+
+vlt-ariane:
+  stage: build
+  script:
+    - cd build
+    - sims -sys=manycore -vlt_build -x_tiles=1 -y_tiles=1 -ariane
+
+vlt-sparc:
+  stage: build
+  script:
+    - cd build
+    - sims -sys=manycore -vlt_build -x_tiles=1 -y_tiles=1
+
+
+###################################
+# run simple pico tests, needs 32bit RISCV compiler
+
+#princeton:
+#  stage: pico
+#  script:
+#    - cd build
+#    - sims -group=pico_tile1 -sim_type=msm
+
+###################################
+# run simple sparc tests
+
+msm-princeton:
+  stage: sparc
+  script:
+    - cd build
+    - sims -sys=manycore -msm_build -x_tiles=1 -y_tiles=1
+    - sims -sys=manycore -msm_run -x_tiles=1 -y_tiles=1  princeton-test-test.s
+    - "grep 'Simulation -> PASS (HIT GOOD TRAP)' status.log"
+
+msm-tile1_mini:
+  stage: sparc
+  script:
+    - cd build
+    - sims -group=tile1_mini -sim_type=msm
+    - "cd 2*"
+    - "regreport . -summary | tee regress.log"
+    - "grep 'REGRESSION PASSED' regress.log"
+
+msm-tile2_mini:
+  stage: sparc
+  script:
+    - cd build
+    - sims -group=tile2_mini -sim_type=msm
+    - "cd 2*"
+    - "regreport . -summary | tee regress.log"
+    - "grep 'REGRESSION PASSED' regress.log"
+
+vcs-princeton:
+  stage: sparc
+  script:
+    - cd build
+    - sims -sys=manycore -vcs_build -x_tiles=1 -y_tiles=1
+    - sims -sys=manycore -vcs_run -x_tiles=1 -y_tiles=1  princeton-test-test.s
+    - "grep 'Simulation -> PASS (HIT GOOD TRAP)' status.log"
+
+vcs-tile1_mini:
+  stage: sparc
+  script:
+    - cd build
+    - sims -group=tile1_mini -sim_type=vcs
+    - "cd 2*"
+    - "regreport . -summary | tee regress.log"
+    - "grep 'REGRESSION PASSED' regress.log"
+
+vcs-tile2_mini:
+  stage: sparc
+  script:
+    - cd build
+    - sims -group=tile2_mini -sim_type=vcs
+    - "cd 2*"
+    - "regreport . -summary | tee regress.log"
+    - "grep 'REGRESSION PASSED' regress.log"
+
+vlt-princeton:
+  stage: sparc
+  script:
+    - cd build
+    - sims -sys=manycore -vlt_build -x_tiles=1 -y_tiles=1
+    - sims -sys=manycore -vlt_run -x_tiles=1 -y_tiles=1  princeton-test-test.s
+    - "grep 'Simulation -> PASS (HIT GOOD TRAP)' status.log"
+
+vlt-tile1_mini:
+  stage: sparc
+  script:
+    - cd build
+    - sims -group=tile1_mini -sim_type=vlt
+    - "cd 2*"
+    - "regreport . -summary | tee regress.log"
+    - "grep 'REGRESSION PASSED' regress.log"
+
+# some tests do not correctly run on Verilator yet
+# vlt-tile2_mini:
+#   stage: sparc
+#   script:
+#     - cd build
+#     - sims -group=tile2_mini -sim_type=vlt
+#     - "cd 2*"
+#     - "regreport . -summary | tee regress.log"
+#     - "grep 'REGRESSION PASSED' regress.log"
+
+###################################
+# run simple ariane tests, needs 64bit RISCV compiler
+
+tile1_asm_tests_p:
+  stage: ariane
+  script:
+    - sims -group=ariane_tile1_asm_tests_p -sim_type=msm
+    - "cd 2*"
+    - "regreport . -summary | tee regress.log"
+    - "grep 'REGRESSION PASSED' regress.log"
+
+tile1_asm_tests_v:
+  stage: ariane
+  script:
+    - sims -group=ariane_tile1_asm_tests_v -sim_type=msm
+    - "cd 2*"
+    - "regreport . -summary | tee regress.log"
+    - "grep 'REGRESSION PASSED' regress.log"
+
+tile1_amo_tests_p:
+  stage: ariane
+  script:
+    - sims -group=ariane_tile1_amo_tests_p -sim_type=msm
+    - "cd 2*"
+    - "regreport . -summary | tee regress.log"
+    - "grep 'REGRESSION PASSED' regress.log"
+
+tile1_amo_tests_v:
+  stage: ariane
+  script:
+    - sims -group=ariane_tile1_amo_tests_v -sim_type=msm
+    - "cd 2*"
+    - "regreport . -summary | tee regress.log"
+    - "grep 'REGRESSION PASSED' regress.log"
+
+tile1_fp_tests_p:
+  stage: ariane
+  script:
+    - sims -group=ariane_tile1_fp_tests_p -sim_type=msm
+    - "cd 2*"
+    - "regreport . -summary | tee regress.log"
+    - "grep 'REGRESSION PASSED' regress.log"
+
+tile1_fp_tests_v:
+  stage: ariane
+  script:
+    - sims -group=ariane_tile1_fp_tests_v -sim_type=msm
+    - "cd 2*"
+    - "regreport . -summary | tee regress.log"
+    - "grep 'REGRESSION PASSED' regress.log"
+
+tile1_benchmarks:
+  stage: ariane
+  script:
+    - sims -group=ariane_tile1_benchmarks -sim_type=msm
+    - "cd 2*"
+    - "regreport . -summary | tee regress.log"
+    - "grep 'REGRESSION PASSED' regress.log"
+
+msm-tile1_simple:
+  stage: ariane
+  script:
+    - sims -group=ariane_tile1_simple -sim_type=msm
+    - "cd 2*"
+    - "regreport . -summary | tee regress.log"
+    - "grep 'REGRESSION PASSED' regress.log"
+    - "cat ariane*/fake_uart.log"
+
+vcs-tile1_simple:
+  stage: ariane
+  script:
+    - sims -group=ariane_tile1_simple -sim_type=vcs
+    - "cd 2*"
+    - "regreport . -summary | tee regress.log"
+    - "grep 'REGRESSION PASSED' regress.log"
+    - "cat ariane*/fake_uart.log"
+
+vlt-tile1_simple:
+  stage: ariane
+  script:
+    - sims -group=ariane_tile1_simple -sim_type=vlt
+    - "cd 2*"
+    - "regreport . -summary | tee regress.log"
+    - "grep 'REGRESSION PASSED' regress.log"
+    - "cat ariane*/fake_uart.log"
+
+
+msm-tile16_simple:
+  stage: ariane
+  script:
+    - sims -group=ariane_tile16_simple -sim_type=msm
+    - "cd 2*"
+    - "regreport . -summary | tee regress.log"
+    - "grep 'REGRESSION PASSED' regress.log"
+    - "cat ariane*/fake_uart.log"
+
+vcs-tile16_simple:
+  stage: ariane
+  script:
+    - sims -group=ariane_tile16_simple -sim_type=vcs
+    - "cd 2*"
+    - "regreport . -summary | tee regress.log"
+    - "grep 'REGRESSION PASSED' regress.log"
+    - "cat ariane*/fake_uart.log"
+
+vlt-tile16_simple:
+  stage: ariane
+  script:
+    - sims -group=ariane_tile16_simple -sim_type=vlt
+    - "cd 2*"
+    - "regreport . -summary | tee regress.log"
+    - "grep 'REGRESSION PASSED' regress.log"
+    - "cat ariane*/fake_uart.log"

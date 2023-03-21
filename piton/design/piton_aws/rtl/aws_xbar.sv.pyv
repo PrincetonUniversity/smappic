@@ -1,0 +1,356 @@
+// Copyright (c) 2023 Princeton University
+// All rights reserved.
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are met:
+//     * Redistributions of source code must retain the above copyright
+//       notice, this list of conditions and the following disclaimer.
+//     * Redistributions in binary form must reproduce the above copyright
+//       notice, this list of conditions and the following disclaimer in the
+//       documentation and/or other materials provided with the distribution.
+//     * Neither the name of Princeton University nor the
+//       names of its contributors may be used to endorse or promote products
+//       derived from this software without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY PRINCETON UNIVERSITY "AS IS" AND
+// ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+// WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+// DISCLAIMED. IN NO EVENT SHALL PRINCETON UNIVERSITY BE LIABLE FOR ANY
+// DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+// (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+// LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+// ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+// SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+// Filename: aws_xbar.sv
+// Author: gchirkov
+// Description: Wrapper over xilinx ip core for axi crossbar between piton instances
+
+<%
+from pyhplib import *
+%>
+
+`include "define.tmp.h"
+`include "axi_defines.vh"
+
+
+
+module aws_xbar (
+<%
+for i in range(PITON_NUM_CHIPS_PER_FPGA+1):
+    print(f'''\
+    input [`AXI4_ID_WIDTH-1:0] s{i}_axi_awid,
+    input [`AXI4_ADDR_WIDTH-1:0] s{i}_axi_awaddr,
+    input [`AXI4_LEN_WIDTH-1:0] s{i}_axi_awlen,
+    input [`AXI4_SIZE_WIDTH-1:0] s{i}_axi_awsize,
+    input [`AXI4_BURST_WIDTH-1:0] s{i}_axi_awburst,
+    input s{i}_axi_awlock,
+    input [`AXI4_CACHE_WIDTH-1:0] s{i}_axi_awcache,
+    input [`AXI4_PROT_WIDTH-1:0] s{i}_axi_awprot,
+    input [`AXI4_QOS_WIDTH-1:0] s{i}_axi_awqos,
+    input [`AXI4_USER_WIDTH-1:0] s{i}_axi_awuser,
+    input s{i}_axi_awvalid,
+    output s{i}_axi_awready,
+    input [`AXI4_DATA_WIDTH-1:0] s{i}_axi_wdata,
+    input [`AXI4_STRB_WIDTH-1:0] s{i}_axi_wstrb,
+    input s{i}_axi_wlast,
+    input [`AXI4_USER_WIDTH-1:0] s{i}_axi_wuser,
+    input s{i}_axi_wvalid,
+    output s{i}_axi_wready,
+    output [`AXI4_ID_WIDTH-1:0] s{i}_axi_bid,
+    output [`AXI4_RESP_WIDTH-1:0] s{i}_axi_bresp,
+    output [`AXI4_USER_WIDTH-1:0] s{i}_axi_buser,
+    output s{i}_axi_bvalid,
+    input s{i}_axi_bready,
+    input [`AXI4_ID_WIDTH-1:0] s{i}_axi_arid,
+    input [`AXI4_ADDR_WIDTH-1:0] s{i}_axi_araddr,
+    input [`AXI4_LEN_WIDTH-1:0] s{i}_axi_arlen,
+    input [`AXI4_SIZE_WIDTH-1:0] s{i}_axi_arsize,
+    input [`AXI4_BURST_WIDTH-1:0] s{i}_axi_arburst,
+    input s{i}_axi_arlock,
+    input [`AXI4_CACHE_WIDTH-1:0] s{i}_axi_arcache,
+    input [`AXI4_PROT_WIDTH-1:0] s{i}_axi_arprot,
+    input [`AXI4_QOS_WIDTH-1:0] s{i}_axi_arqos,
+    input [`AXI4_USER_WIDTH-1:0] s{i}_axi_aruser,
+    input s{i}_axi_arvalid,
+    output s{i}_axi_arready,
+    output [`AXI4_ID_WIDTH-1:0] s{i}_axi_rid,
+    output [`AXI4_DATA_WIDTH-1:0] s{i}_axi_rdata,
+    output [`AXI4_RESP_WIDTH-1:0] s{i}_axi_rresp,
+    output s{i}_axi_rlast,
+    output [`AXI4_USER_WIDTH-1:0] s{i}_axi_ruser,
+    output s{i}_axi_rvalid,
+    input s{i}_axi_rready,
+
+    output [`AXI4_ID_WIDTH-1:0] m{i}_axi_awid,
+    output [`AXI4_ADDR_WIDTH-1:0] m{i}_axi_awaddr,
+    output [`AXI4_LEN_WIDTH-1:0] m{i}_axi_awlen,
+    output [`AXI4_SIZE_WIDTH-1:0] m{i}_axi_awsize,
+    output [`AXI4_BURST_WIDTH-1:0] m{i}_axi_awburst,
+    output m{i}_axi_awlock,
+    output [`AXI4_CACHE_WIDTH-1:0] m{i}_axi_awcache,
+    output [`AXI4_PROT_WIDTH-1:0] m{i}_axi_awprot,
+    output [`AXI4_REGION_WIDTH-1:0] m{i}_axi_awregion,
+    output [`AXI4_QOS_WIDTH-1:0] m{i}_axi_awqos,
+    output [`AXI4_USER_WIDTH-1:0] m{i}_axi_awuser,
+    output m{i}_axi_awvalid,
+    input m{i}_axi_awready,
+    output [`AXI4_DATA_WIDTH-1:0] m{i}_axi_wdata,
+    output [`AXI4_STRB_WIDTH-1:0] m{i}_axi_wstrb,
+    output m{i}_axi_wlast,
+    output [`AXI4_USER_WIDTH-1:0] m{i}_axi_wuser,
+    output m{i}_axi_wvalid,
+    input m{i}_axi_wready,
+    input [`AXI4_ID_WIDTH-1:0] m{i}_axi_bid,
+    input [`AXI4_RESP_WIDTH-1:0] m{i}_axi_bresp,
+    input [`AXI4_USER_WIDTH-1:0] m{i}_axi_buser,
+    input m{i}_axi_bvalid,
+    output m{i}_axi_bready,
+    output [`AXI4_ID_WIDTH-1:0] m{i}_axi_arid,
+    output [`AXI4_ADDR_WIDTH-1:0] m{i}_axi_araddr,
+    output [`AXI4_LEN_WIDTH-1:0] m{i}_axi_arlen,
+    output [`AXI4_SIZE_WIDTH-1:0] m{i}_axi_arsize,
+    output [`AXI4_BURST_WIDTH-1:0] m{i}_axi_arburst,
+    output m{i}_axi_arlock,
+    output [`AXI4_CACHE_WIDTH-1:0] m{i}_axi_arcache,
+    output [`AXI4_PROT_WIDTH-1:0] m{i}_axi_arprot,
+    output [`AXI4_REGION_WIDTH-1:0] m{i}_axi_arregion,
+    output [`AXI4_QOS_WIDTH-1:0] m{i}_axi_arqos,
+    output [`AXI4_USER_WIDTH-1:0] m{i}_axi_aruser,
+    output m{i}_axi_arvalid,
+    input m{i}_axi_arready,
+    input [`AXI4_ID_WIDTH-1:0] m{i}_axi_rid,
+    input [`AXI4_DATA_WIDTH-1:0] m{i}_axi_rdata,
+    input [`AXI4_RESP_WIDTH-1:0] m{i}_axi_rresp,
+    input m{i}_axi_rlast,
+    input [`AXI4_USER_WIDTH-1:0] m{i}_axi_ruser,
+    input m{i}_axi_rvalid,
+    output m{i}_axi_rready,
+''')
+%>
+
+    input clk, 
+    input rst_n
+);
+
+<%
+print(f'''
+wire [`AXI4_ADDR_WIDTH-1:0] s{PITON_NUM_CHIPS_PER_FPGA}_axi_awaddr_normalized;
+wire [`AXI4_ADDR_WIDTH-1:0] s{PITON_NUM_CHIPS_PER_FPGA}_axi_araddr_normalized;
+
+axi_addr_normalizer read_normalizer(
+    .axi_addr_in(s{PITON_NUM_CHIPS_PER_FPGA}_axi_araddr),
+    .axi_addr_out(s{PITON_NUM_CHIPS_PER_FPGA}_axi_araddr_normalized)
+);
+
+axi_addr_normalizer write_normalizer(
+    .axi_addr_in(s{PITON_NUM_CHIPS_PER_FPGA}_axi_awaddr),
+    .axi_addr_out(s{PITON_NUM_CHIPS_PER_FPGA}_axi_awaddr_normalized)
+);
+''')
+%>
+
+<%
+def combined_wire(prefix, name, width):
+    if name[-4:] == 'addr':
+        res = f'wire [{PITON_NUM_MC_PER_FPGA+1}*{width}-1:0] {prefix}_axi_{name} = {{{prefix}{PITON_NUM_CHIPS_PER_FPGA}_axi_{name}_normalized, '
+    else:
+        res = f'wire [{PITON_NUM_MC_PER_FPGA+1}*{width}-1:0] {prefix}_axi_{name} = {{{prefix}{PITON_NUM_CHIPS_PER_FPGA}_axi_{name}, '
+    for i in range(PITON_NUM_MC_PER_FPGA-1, PITON_NUM_CHIPS_PER_FPGA-1, -1):
+        res += f"{width}'b0, "
+    for i in range(PITON_NUM_CHIPS_PER_FPGA-1, 0, -1):
+        res += f'{prefix}{i}_axi_{name}, '
+    res += f'{prefix}0_axi_{name}}};'
+    return res
+
+print(combined_wire('s', 'awid', '`AXI4_ID_WIDTH'))
+print(combined_wire('s', 'awaddr', '`AXI4_ADDR_WIDTH'))
+print(combined_wire('s', 'awlen', '`AXI4_LEN_WIDTH'))
+print(combined_wire('s', 'awsize', '`AXI4_SIZE_WIDTH'))
+print(combined_wire('s', 'awburst', '`AXI4_BURST_WIDTH'))
+print(combined_wire('s', 'awlock', '1'))
+print(combined_wire('s', 'awcache', '`AXI4_CACHE_WIDTH'))
+print(combined_wire('s', 'awprot', '`AXI4_PROT_WIDTH'))
+print(combined_wire('s', 'awqos', '`AXI4_QOS_WIDTH'))
+print(combined_wire('s', 'awuser', '`AXI4_USER_WIDTH'))
+print(combined_wire('s', 'awvalid', '1'))
+print(combined_wire('s', 'wdata', '`AXI4_DATA_WIDTH'))
+print(combined_wire('s', 'wstrb', '`AXI4_STRB_WIDTH'))
+print(combined_wire('s', 'wlast', '1'))
+print(combined_wire('s', 'wuser', '`AXI4_USER_WIDTH'))
+print(combined_wire('s', 'wvalid', '1'))
+print(combined_wire('s', 'bready', '1'))
+print(combined_wire('s', 'arid', '`AXI4_ID_WIDTH'))
+print(combined_wire('s', 'araddr', '`AXI4_ADDR_WIDTH'))
+print(combined_wire('s', 'arlen', '`AXI4_LEN_WIDTH'))
+print(combined_wire('s', 'arsize', '`AXI4_SIZE_WIDTH'))
+print(combined_wire('s', 'arburst', '`AXI4_BURST_WIDTH'))
+print(combined_wire('s', 'arlock', '1'))
+print(combined_wire('s', 'arcache', '`AXI4_CACHE_WIDTH'))
+print(combined_wire('s', 'arprot', '`AXI4_PROT_WIDTH'))
+print(combined_wire('s', 'arqos', '`AXI4_QOS_WIDTH'))
+print(combined_wire('s', 'aruser', '`AXI4_USER_WIDTH'))
+print(combined_wire('s', 'arvalid', '1'))
+print(combined_wire('s', 'rready', '1'))
+print(combined_wire('m', 'awready', '1'))
+print(combined_wire('m', 'wready', '1'))
+print(combined_wire('m', 'bid', '`AXI4_ID_WIDTH'))
+print(combined_wire('m', 'bresp', '`AXI4_RESP_WIDTH'))
+print(combined_wire('m', 'buser', '`AXI4_USER_WIDTH'))
+print(combined_wire('m', 'bvalid', '1'))
+print(combined_wire('m', 'arready', '1'))
+print(combined_wire('m', 'rid', '`AXI4_ID_WIDTH'))
+print(combined_wire('m', 'rdata', '`AXI4_DATA_WIDTH'))
+print(combined_wire('m', 'rresp', '`AXI4_RESP_WIDTH'))
+print(combined_wire('m', 'rlast', '1'))
+print(combined_wire('m', 'ruser', '`AXI4_USER_WIDTH'))
+print(combined_wire('m', 'rvalid', '1'))
+print('\n')
+
+def disassemble_wire(prefix, name, width):
+    res = f'wire [{PITON_NUM_MC_PER_FPGA+1}*{width}-1:0] {prefix}_axi_{name};' + '\n'
+    res += f'assign {prefix}0_axi_{name} = {prefix}_axi_{name}[{width}-1:0];' + '\n'
+    for i in range(1, PITON_NUM_CHIPS_PER_FPGA):
+        res += f'assign {prefix}{i}_axi_{name} = {prefix}_axi_{name}[{width}*{i+1}-1:{width}*{i}];' + '\n'
+    res += f'assign {prefix}{PITON_NUM_CHIPS_PER_FPGA}_axi_{name} = {prefix}_axi_{name}[{width}*{PITON_NUM_MC_PER_FPGA+1}-1:{width}*{PITON_NUM_MC_PER_FPGA}];' + '\n'
+    return res
+
+print(disassemble_wire('s', 'awready', '1'))
+print(disassemble_wire('s', 'wready', '1'))
+print(disassemble_wire('s', 'bid', '`AXI4_ID_WIDTH'))
+print(disassemble_wire('s', 'bresp', '`AXI4_RESP_WIDTH'))
+print(disassemble_wire('s', 'buser', '`AXI4_USER_WIDTH'))
+print(disassemble_wire('s', 'bvalid', '1'))
+print(disassemble_wire('s', 'arready', '1'))
+print(disassemble_wire('s', 'rid', '`AXI4_ID_WIDTH'))
+print(disassemble_wire('s', 'rdata', '`AXI4_DATA_WIDTH'))
+print(disassemble_wire('s', 'rresp', '`AXI4_RESP_WIDTH'))
+print(disassemble_wire('s', 'rlast', '1'))
+print(disassemble_wire('s', 'ruser', '`AXI4_USER_WIDTH'))
+print(disassemble_wire('s', 'rvalid', '1'))
+print(disassemble_wire('m', 'awid', '`AXI4_ID_WIDTH'))
+print(disassemble_wire('m', 'awaddr', '`AXI4_ADDR_WIDTH'))
+print(disassemble_wire('m', 'awlen', '`AXI4_LEN_WIDTH'))
+print(disassemble_wire('m', 'awsize', '`AXI4_SIZE_WIDTH'))
+print(disassemble_wire('m', 'awburst', '`AXI4_BURST_WIDTH'))
+print(disassemble_wire('m', 'awlock', '1'))
+print(disassemble_wire('m', 'awcache', '`AXI4_CACHE_WIDTH'))
+print(disassemble_wire('m', 'awprot', '`AXI4_PROT_WIDTH'))
+print(disassemble_wire('m', 'awqos', '`AXI4_QOS_WIDTH'))
+print(disassemble_wire('m', 'awuser', '`AXI4_USER_WIDTH'))
+print(disassemble_wire('m', 'awvalid', '1'))
+print(disassemble_wire('m', 'wdata', '`AXI4_DATA_WIDTH'))
+print(disassemble_wire('m', 'wstrb', '`AXI4_STRB_WIDTH'))
+print(disassemble_wire('m', 'wlast', '1'))
+print(disassemble_wire('m', 'wuser', '`AXI4_USER_WIDTH'))
+print(disassemble_wire('m', 'wvalid', '1'))
+print(disassemble_wire('m', 'bready', '1'))
+print(disassemble_wire('m', 'arid', '`AXI4_ID_WIDTH'))
+print(disassemble_wire('m', 'araddr', '`AXI4_ADDR_WIDTH'))
+print(disassemble_wire('m', 'arlen', '`AXI4_LEN_WIDTH'))
+print(disassemble_wire('m', 'arsize', '`AXI4_SIZE_WIDTH'))
+print(disassemble_wire('m', 'arburst', '`AXI4_BURST_WIDTH'))
+print(disassemble_wire('m', 'arlock', '1'))
+print(disassemble_wire('m', 'arcache', '`AXI4_CACHE_WIDTH'))
+print(disassemble_wire('m', 'arprot', '`AXI4_PROT_WIDTH'))
+print(disassemble_wire('m', 'arqos', '`AXI4_QOS_WIDTH'))
+print(disassemble_wire('m', 'aruser', '`AXI4_USER_WIDTH'))
+print(disassemble_wire('m', 'arvalid', '1'))
+print(disassemble_wire('m', 'rready', '1'))
+
+
+%>
+
+aws_axi_crossbar aws_axi_crossbar (
+  .aclk(clk),                      // input wire aclk
+  .aresetn(rst_n),                // input wire aresetn
+  .s_axi_awid(s_axi_awid),          // input wire [29 : 0] s_axi_awid
+  .s_axi_awaddr(s_axi_awaddr),      // input wire [319 : 0] s_axi_awaddr
+  .s_axi_awlen(s_axi_awlen),        // input wire [39 : 0] s_axi_awlen
+  .s_axi_awsize(s_axi_awsize),      // input wire [14 : 0] s_axi_awsize
+  .s_axi_awburst(s_axi_awburst),    // input wire [9 : 0] s_axi_awburst
+  .s_axi_awlock(s_axi_awlock),      // input wire [4 : 0] s_axi_awlock
+  .s_axi_awcache(s_axi_awcache),    // input wire [19 : 0] s_axi_awcache
+  .s_axi_awprot(s_axi_awprot),      // input wire [14 : 0] s_axi_awprot
+  .s_axi_awqos(s_axi_awqos),        // input wire [19 : 0] s_axi_awqos
+  .s_axi_awuser(s_axi_awuser),      // input wire [54 : 0] s_axi_awuser
+  .s_axi_awvalid(s_axi_awvalid),    // input wire [4 : 0] s_axi_awvalid
+  .s_axi_awready(s_axi_awready),    // output wire [4 : 0] s_axi_awready
+  .s_axi_wdata(s_axi_wdata),        // input wire [2559 : 0] s_axi_wdata
+  .s_axi_wstrb(s_axi_wstrb),        // input wire [319 : 0] s_axi_wstrb
+  .s_axi_wlast(s_axi_wlast),        // input wire [4 : 0] s_axi_wlast
+  .s_axi_wuser(s_axi_wuser),        // input wire [54 : 0] s_axi_wuser
+  .s_axi_wvalid(s_axi_wvalid),      // input wire [4 : 0] s_axi_wvalid
+  .s_axi_wready(s_axi_wready),      // output wire [4 : 0] s_axi_wready
+  .s_axi_bid(s_axi_bid),            // output wire [29 : 0] s_axi_bid
+  .s_axi_bresp(s_axi_bresp),        // output wire [9 : 0] s_axi_bresp
+  .s_axi_buser(s_axi_buser),        // output wire [54 : 0] s_axi_buser
+  .s_axi_bvalid(s_axi_bvalid),      // output wire [4 : 0] s_axi_bvalid
+  .s_axi_bready(s_axi_bready),      // input wire [4 : 0] s_axi_bready
+  .s_axi_arid(s_axi_arid),          // input wire [29 : 0] s_axi_arid
+  .s_axi_araddr(s_axi_araddr),      // input wire [319 : 0] s_axi_araddr
+  .s_axi_arlen(s_axi_arlen),        // input wire [39 : 0] s_axi_arlen
+  .s_axi_arsize(s_axi_arsize),      // input wire [14 : 0] s_axi_arsize
+  .s_axi_arburst(s_axi_arburst),    // input wire [9 : 0] s_axi_arburst
+  .s_axi_arlock(s_axi_arlock),      // input wire [4 : 0] s_axi_arlock
+  .s_axi_arcache(s_axi_arcache),    // input wire [19 : 0] s_axi_arcache
+  .s_axi_arprot(s_axi_arprot),      // input wire [14 : 0] s_axi_arprot
+  .s_axi_arqos(s_axi_arqos),        // input wire [19 : 0] s_axi_arqos
+  .s_axi_aruser(s_axi_aruser),      // input wire [54 : 0] s_axi_aruser
+  .s_axi_arvalid(s_axi_arvalid),    // input wire [4 : 0] s_axi_arvalid
+  .s_axi_arready(s_axi_arready),    // output wire [4 : 0] s_axi_arready
+  .s_axi_rid(s_axi_rid),            // output wire [29 : 0] s_axi_rid
+  .s_axi_rdata(s_axi_rdata),        // output wire [2559 : 0] s_axi_rdata
+  .s_axi_rresp(s_axi_rresp),        // output wire [9 : 0] s_axi_rresp
+  .s_axi_rlast(s_axi_rlast),        // output wire [4 : 0] s_axi_rlast
+  .s_axi_ruser(s_axi_ruser),        // output wire [54 : 0] s_axi_ruser
+  .s_axi_rvalid(s_axi_rvalid),      // output wire [4 : 0] s_axi_rvalid
+  .s_axi_rready(s_axi_rready),      // input wire [4 : 0] s_axi_rready
+  .m_axi_awid(m_axi_awid),          // output wire [29 : 0] m_axi_awid
+  .m_axi_awaddr(m_axi_awaddr),      // output wire [319 : 0] m_axi_awaddr
+  .m_axi_awlen(m_axi_awlen),        // output wire [39 : 0] m_axi_awlen
+  .m_axi_awsize(m_axi_awsize),      // output wire [14 : 0] m_axi_awsize
+  .m_axi_awburst(m_axi_awburst),    // output wire [9 : 0] m_axi_awburst
+  .m_axi_awlock(m_axi_awlock),      // output wire [4 : 0] m_axi_awlock
+  .m_axi_awcache(m_axi_awcache),    // output wire [19 : 0] m_axi_awcache
+  .m_axi_awprot(m_axi_awprot),      // output wire [14 : 0] m_axi_awprot
+  .m_axi_awregion(m_axi_awregion),  // output wire [19 : 0] m_axi_awregion
+  .m_axi_awqos(m_axi_awqos),        // output wire [19 : 0] m_axi_awqos
+  .m_axi_awuser(m_axi_awuser),      // output wire [54 : 0] m_axi_awuser
+  .m_axi_awvalid(m_axi_awvalid),    // output wire [4 : 0] m_axi_awvalid
+  .m_axi_awready(m_axi_awready),    // input wire [4 : 0] m_axi_awready
+  .m_axi_wdata(m_axi_wdata),        // output wire [2559 : 0] m_axi_wdata
+  .m_axi_wstrb(m_axi_wstrb),        // output wire [319 : 0] m_axi_wstrb
+  .m_axi_wlast(m_axi_wlast),        // output wire [4 : 0] m_axi_wlast
+  .m_axi_wuser(m_axi_wuser),        // output wire [54 : 0] m_axi_wuser
+  .m_axi_wvalid(m_axi_wvalid),      // output wire [4 : 0] m_axi_wvalid
+  .m_axi_wready(m_axi_wready),      // input wire [4 : 0] m_axi_wready
+  .m_axi_bid(m_axi_bid),            // input wire [29 : 0] m_axi_bid
+  .m_axi_bresp(m_axi_bresp),        // input wire [9 : 0] m_axi_bresp
+  .m_axi_buser(m_axi_buser),        // input wire [54 : 0] m_axi_buser
+  .m_axi_bvalid(m_axi_bvalid),      // input wire [4 : 0] m_axi_bvalid
+  .m_axi_bready(m_axi_bready),      // output wire [4 : 0] m_axi_bready
+  .m_axi_arid(m_axi_arid),          // output wire [29 : 0] m_axi_arid
+  .m_axi_araddr(m_axi_araddr),      // output wire [319 : 0] m_axi_araddr
+  .m_axi_arlen(m_axi_arlen),        // output wire [39 : 0] m_axi_arlen
+  .m_axi_arsize(m_axi_arsize),      // output wire [14 : 0] m_axi_arsize
+  .m_axi_arburst(m_axi_arburst),    // output wire [9 : 0] m_axi_arburst
+  .m_axi_arlock(m_axi_arlock),      // output wire [4 : 0] m_axi_arlock
+  .m_axi_arcache(m_axi_arcache),    // output wire [19 : 0] m_axi_arcache
+  .m_axi_arprot(m_axi_arprot),      // output wire [14 : 0] m_axi_arprot
+  .m_axi_arregion(m_axi_arregion),  // output wire [19 : 0] m_axi_arregion
+  .m_axi_arqos(m_axi_arqos),        // output wire [19 : 0] m_axi_arqos
+  .m_axi_aruser(m_axi_aruser),      // output wire [54 : 0] m_axi_aruser
+  .m_axi_arvalid(m_axi_arvalid),    // output wire [4 : 0] m_axi_arvalid
+  .m_axi_arready(m_axi_arready),    // input wire [4 : 0] m_axi_arready
+  .m_axi_rid(m_axi_rid),            // input wire [29 : 0] m_axi_rid
+  .m_axi_rdata(m_axi_rdata),        // input wire [2559 : 0] m_axi_rdata
+  .m_axi_rresp(m_axi_rresp),        // input wire [9 : 0] m_axi_rresp
+  .m_axi_rlast(m_axi_rlast),        // input wire [4 : 0] m_axi_rlast
+  .m_axi_ruser(m_axi_ruser),        // input wire [54 : 0] m_axi_ruser
+  .m_axi_rvalid(m_axi_rvalid),      // input wire [4 : 0] m_axi_rvalid
+  .m_axi_rready(m_axi_rready)       // output wire [4 : 0] m_axi_rready
+);
+
+endmodule

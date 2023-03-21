@@ -1,0 +1,276 @@
+// ========== Copyright Header Begin ============================================
+// Copyright (c) 2022 Princeton University
+// All rights reserved.
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are met:
+//     * Redistributions of source code must retain the above copyright
+//       notice, this list of conditions and the following disclaimer.
+//     * Redistributions in binary form must reproduce the above copyright
+//       notice, this list of conditions and the following disclaimer in the
+//       documentation and/or other materials provided with the distribution.
+//     * Neither the name of Princeton University nor the
+//       names of its contributors may be used to endorse or promote products
+//       derived from this software without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY PRINCETON UNIVERSITY "AS IS" AND
+// ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+// WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+// DISCLAIMED. IN NO EVENT SHALL PRINCETON UNIVERSITY BE LIABLE FOR ANY
+// DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+// (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+// LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+// ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+// SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+// ========== Copyright Header End ============================================
+
+
+`include "axi_defines.vh"
+`include "define.tmp.h"
+
+<%
+from pyhplib import *
+%>
+
+module axi2noc_credits (
+    input axi_clk,    // Clock
+    input axi_rst_n,  // Asynchronous reset active low
+    input piton_clk, 
+    input piton_rst_n,
+
+    input [`NOC_CHIPID_WIDTH-1:0] noc1_chosen_src, 
+    input noc1_credit, 
+    input [`NOC_CHIPID_WIDTH-1:0] noc2_chosen_src, 
+    input noc2_credit, 
+    input [`NOC_CHIPID_WIDTH-1:0] noc3_chosen_src, 
+    input noc3_credit, 
+
+    input  wire  [`AXI4_ID_WIDTH     -1:0]    s_axi_arid,
+    input  wire  [`AXI4_ADDR_WIDTH   -1:0]    s_axi_araddr,
+    input  wire  [`AXI4_LEN_WIDTH    -1:0]    s_axi_arlen,
+    input  wire  [`AXI4_SIZE_WIDTH   -1:0]    s_axi_arsize,
+    input  wire                               s_axi_arvalid,
+    output wire                               s_axi_arready,
+    output reg   [`AXI4_ID_WIDTH     -1:0]    s_axi_rid,
+    output reg   [`AXI4_DATA_WIDTH   -1:0]    s_axi_rdata,
+    output wire  [`AXI4_RESP_WIDTH   -1:0]    s_axi_rresp,
+    output wire                               s_axi_rlast,
+    output reg                                s_axi_rvalid,
+    input  wire                               s_axi_rready,
+
+    input wire   [`NOC_CHIPID_WIDTH-1:0]      chipid
+);
+
+
+
+// sync noc*_credit_chip back to axi_clk
+
+wire [`NOC_CHIPID_WIDTH-1:0] noc1_credit_chip_synced;
+wire [`NOC_CHIPID_WIDTH-1:0] noc2_credit_chip_synced;
+wire [`NOC_CHIPID_WIDTH-1:0] noc3_credit_chip_synced;
+wire credit_fifo1_empty;
+wire credit_fifo2_empty;
+wire credit_fifo3_empty;
+
+`ifdef PITON_PROTO
+afifo_w14_d16 async_credit_fifo1(
+    .rst(~piton_rst_n),
+    .wr_clk(piton_clk),
+    .rd_clk(axi_clk),
+    .rd_en(1'b1),
+    .wr_en(noc1_credit),
+    .din(noc1_chosen_src),
+    .dout(noc1_credit_chip_synced),
+    .full(),
+    .empty(credit_fifo1_empty)
+);
+`else // ifndef PITON_PROTO
+async_fifo #(
+.DSIZE(14),
+.ASIZE(5),
+.MEMSIZE(16) )
+async_credit_fifo1(
+    .rreset(~axi_rst_n),
+    .wreset(~piton_rst_n),
+    .wclk(piton_clk),
+    .rclk(axi_clk),
+    .ren(1'b1),
+    .wval(noc1_credit),
+    .wdata(noc1_chosen_src),
+    .rdata(noc1_credit_chip_synced),
+    .wfull(),   
+    .rempty(credit_fifo1_empty)
+);
+`endif //endif PITON_PROTO
+`ifdef PITON_PROTO
+afifo_w14_d16 async_credit_fifo2(
+    .rst(~piton_rst_n),
+    .wr_clk(piton_clk),
+    .rd_clk(axi_clk),
+    .rd_en(1'b1),
+    .wr_en(noc2_credit),
+    .din(noc2_chosen_src),
+    .dout(noc2_credit_chip_synced),
+    .full(),
+    .empty(credit_fifo2_empty)
+);
+`else // ifndef PITON_PROTO
+async_fifo #(
+.DSIZE(14),
+.ASIZE(5),
+.MEMSIZE(16) )
+async_credit_fifo2(
+    .rreset(~axi_rst_n),
+    .wreset(~piton_rst_n),
+    .wclk(piton_clk),
+    .rclk(axi_clk),
+    .ren(1'b1),
+    .wval(noc2_credit),
+    .wdata(noc2_chosen_src),
+    .rdata(noc2_credit_chip_synced),
+    .wfull(),   
+    .rempty(credit_fifo2_empty)
+);
+`endif //endif PITON_PROTO
+`ifdef PITON_PROTO
+afifo_w14_d16 async_credit_fifo3(
+    .rst(~piton_rst_n),
+    .wr_clk(piton_clk),
+    .rd_clk(axi_clk),
+    .rd_en(1'b1),
+    .wr_en(noc3_credit),
+    .din(noc3_chosen_src),
+    .dout(noc3_credit_chip_synced),
+    .full(),
+    .empty(credit_fifo3_empty)
+);
+`else // ifndef PITON_PROTO
+async_fifo #(
+.DSIZE(14),
+.ASIZE(5),
+.MEMSIZE(16) )
+async_credit_fifo3(
+    .rreset(~axi_rst_n),
+    .wreset(~piton_rst_n),
+    .wclk(piton_clk),
+    .rclk(axi_clk),
+    .ren(1'b1),
+    .wval(noc3_credit),
+    .wdata(noc3_chosen_src),
+    .rdata(noc3_credit_chip_synced),
+    .wfull(),   
+    .rempty(credit_fifo3_empty)
+);
+`endif //endif PITON_PROTO
+
+
+<%
+for i in range(PITON_NUM_CHIPS):
+    str = f'''\
+wire credits1_chip{i}_up = ~credit_fifo1_empty & (noc1_credit_chip_synced == {i});
+wire credits2_chip{i}_up = ~credit_fifo2_empty & (noc2_credit_chip_synced == {i});
+wire credits3_chip{i}_up = ~credit_fifo3_empty & (noc3_credit_chip_synced == {i});
+'''
+    print(str)
+str = f'''\
+wire credits1_host_up  = ~credit_fifo1_empty & (noc1_credit_chip_synced >= {PITON_NUM_CHIPS});
+wire credits2_host_up  = ~credit_fifo2_empty & (noc2_credit_chip_synced >= {PITON_NUM_CHIPS});
+wire credits3_host_up  = ~credit_fifo3_empty & (noc3_credit_chip_synced >= {PITON_NUM_CHIPS});
+'''
+print(str)
+%>
+
+
+wire axi_ar_go = s_axi_arvalid & s_axi_arready;
+wire axi_r_go = s_axi_rvalid & s_axi_rready;
+wire [`NOC_CHIPID_WIDTH-1:0] ar_chipid = {{(`NOC_CHIPID_WIDTH-5){1'b0}}, s_axi_araddr[13:9]};
+
+<%
+for i in range(PITON_NUM_CHIPS):
+    str = f'''\
+wire credits_chip{i}_down = axi_ar_go & (ar_chipid == {i});
+'''
+    print(str)
+str = f'''\
+wire credits_host_down  = axi_ar_go & (ar_chipid >= {PITON_NUM_CHIPS});
+'''
+print(str)
+%>
+
+<%
+str = f'''\
+reg [7:0] credits1[{PITON_NUM_CHIPS}:0];
+reg [7:0] credits2[{PITON_NUM_CHIPS}:0];
+reg [7:0] credits3[{PITON_NUM_CHIPS}:0];
+'''
+print(str)
+
+str = f'''\
+always @(posedge axi_clk) begin
+  if(~axi_rst_n) begin
+'''
+for i in range(PITON_NUM_CHIPS + 1):
+    str += f'''\
+    credits1[{i}] <= 8'd0;
+    credits2[{i}] <= 8'd0;
+    credits3[{i}] <= 8'd0;
+'''
+str += f'''\
+  end
+  else begin
+'''
+for i in range(PITON_NUM_CHIPS):
+    str += f'''\
+    credits1[{i}] <= credits1[{i}] + credits1_chip{i}_up - credits_chip{i}_down*credits1[{i}];
+    credits2[{i}] <= credits2[{i}] + credits2_chip{i}_up - credits_chip{i}_down*credits2[{i}];
+    credits3[{i}] <= credits3[{i}] + credits3_chip{i}_up - credits_chip{i}_down*credits3[{i}];
+'''
+str += f'''\
+    credits1[{PITON_NUM_CHIPS}]  <= credits1[{PITON_NUM_CHIPS}];
+    credits2[{PITON_NUM_CHIPS}]  <= credits2[{PITON_NUM_CHIPS}];
+    credits3[{PITON_NUM_CHIPS}]  <= credits3[{PITON_NUM_CHIPS}];
+'''
+str += f'''\
+  end
+end
+'''
+print(str)
+%>
+
+
+wire [`AXI4_DATA_WIDTH-1:0] rdata = { {(`AXI4_DATA_WIDTH-4*`NOC_DATA_WIDTH){1'b0}}, 
+                                      {(`NOC_DATA_WIDTH-`NOC_CHIPID_WIDTH){1'b0}},
+                                      chipid,
+                                      {(`NOC_DATA_WIDTH-8){1'b0}},
+                                      credits3[ar_chipid], 
+                                      {(`NOC_DATA_WIDTH-8){1'b0}},
+                                      credits2[ar_chipid], 
+                                      {(`NOC_DATA_WIDTH-8){1'b0}},
+                                      credits1[ar_chipid]
+                                    };
+
+assign s_axi_arready = s_axi_rready | ~s_axi_rvalid;
+always @(posedge axi_clk) begin
+    if (~axi_rst_n) begin
+        s_axi_rvalid <= 0;
+        s_axi_rid <= 0;
+        s_axi_rdata <= `AXI4_DATA_WIDTH'h0;
+    end
+    else begin
+        if (axi_ar_go) begin
+            s_axi_rvalid <= 1;
+            s_axi_rid <= s_axi_arid;
+            s_axi_rdata <= rdata;
+        end
+        else if (axi_r_go) begin
+            s_axi_rvalid <= 0;
+        end
+    end
+end
+
+assign s_axi_rlast = 1;
+assign s_axi_rresp = `AXI4_RESP_WIDTH'b0;
+
+
+endmodule : axi2noc_credits

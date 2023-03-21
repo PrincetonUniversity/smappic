@@ -1,0 +1,33 @@
+CAPI=2:
+name: opencores::gng:0.1
+description: OpenCores Gaussian Noise Generator
+
+filesets:
+    rtl:
+        files:
+            - gng_coef.v
+            - gng_ctg.v
+            - gng_interp.v
+            - gng_lzd.v
+            - gng_smul_16_18_sadd_37.v
+            - gng_smul_16_18.v
+            - gng.v
+        file_type: verilogSource
+
+targets:
+    default:
+        filesets: [rtl]
+    pickle:
+        default_tool: icarus
+        filesets: [rtl]
+        toplevel: [gng]
+        tools:
+            icarus:
+                iverilog_options: [-g 2001 -E]
+    verify:
+        default_tool: icarus
+        filesets: [rtl]
+        toplevel: [gng]
+        tools:
+            icarus:
+                iverilog_options: [-g 2001]

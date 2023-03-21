@@ -1,0 +1,13 @@
+.smappic_driver.ko.cmd
+.smappic_driver.mod.o.cmd
+.smappic_driver.o.cmd
+.tmp_versions/
+Module.symvers
+modules.order
+smappic_dma
+smappic_driver.ko
+smappic_driver.mod.c
+smappic_driver.mod.o
+smappic_driver.o
+smappic_reg_rw
+smappic_uart
